@@ -44,16 +44,16 @@ type ErrSchemaTooNew struct{ Baseline, Running int }
 // delegated principal p if and only if it is in grant(p).
 type ErrDelegationUid struct {
 	Service, Principal string
-	// Direction is "granted-not-p" (in grant(p) but runs as another uid) or
-	// "p-not-granted" (runs as p but is outside grant(p)).
+	// Direction is "granted" (in grant(p) but runs as another uid) or
+	// "outside-grant" (runs as p but is outside grant(p)).
 	Direction string
 }
 
 // ErrGrantNotClosed is grant closure under the reverse of every edge kind
 // (D2 option A, extended by REVIEW-4 E2).
 type ErrGrantNotClosed struct {
-	Principal, Granted, Requirer string
-	Edge                         string // "require", "want" or "order"
+	Principal, Granted, Dependent string
+	Edge                          string // "require", "want" or "order"
 }
 
 func (e ErrSyntax) Error() string { return fmt.Sprintf("ErrSyntax: %s: %s", e.Layer, e.Msg) }
@@ -118,7 +118,7 @@ func (e ErrDelegationUid) Error() string {
 }
 func (e ErrGrantNotClosed) Error() string {
 	return fmt.Sprintf("ErrGrantNotClosed: %s is granted to %s but %s reaches it by %s",
-		e.Granted, e.Principal, e.Requirer, e.Edge)
+		e.Granted, e.Principal, e.Dependent, e.Edge)
 }
 
 // CompileError holds every refusal of one Compile, sorted by message, so the

@@ -675,6 +675,23 @@ func TestWaitBudgetRecursesOverEveryEdge(t *testing.T) {
 	wantErr[ErrWaitTooShort](t, l)
 }
 
+func TestWaitBudgetCoversWantTargetsOfARequirer(t *testing.T) {
+	// E9: a requires b and wants c; c's 40s kill timeout is inside W(a) but
+	// not inside U(b), so a budget sized on the require-target alone passes.
+	mk := func(wait string) []Layer {
+		return []Layer{
+			rec("recipe.hcl", svcRecipe("a", "require = [\"b\"]\n  want = [\"c\"]\n  wait {\n    timeout = \""+wait+"\"\n  }")+
+				svcRecipe("b", "")+slowKill("c")),
+			site("site.hcl", baseline+svcSite("a", "")+svcSite("b", "")+svcSite("c", "")),
+		}
+	}
+	e := wantErr[ErrWaitTooShort](t, mk("40s"))
+	if e.Service != "a" {
+		t.Errorf("%+v", e)
+	}
+	mustCompile(t, mk("10m")...)
+}
+
 func grantsLayers(extraRecipeA, extraRecipeB, grant string) []Layer {
 	b := strings.Replace(baseline, `admin = ["alice"]`, `admin = ["alice", "ops"]`, 1)
 	b = strings.Replace(b, "api {", "api {\n  "+grant, 1)
@@ -693,17 +710,23 @@ func TestGrantsRunAsBothWays(t *testing.T) {
 	mustCompile(t, grantsLayers(asOps(), "", grantA)...)
 	// E1, one way: granted but runs as another uid
 	e := wantErr[ErrDelegationUid](t, grantsLayers("", "", grantA))
-	if e.Service != "a" || e.Principal != "ops" || e.Direction != "granted-not-p" {
+	if e.Service != "a" || e.Principal != "ops" || e.Direction != "granted" {
 		t.Errorf("%+v", e)
 	}
 	// E1, the other way: runs as ops but is outside grant(ops)
 	e = wantErr[ErrDelegationUid](t, grantsLayers(asOps(), asOps(), grantA))
-	if e.Service != "b" || e.Direction != "p-not-granted" {
+	if e.Service != "b" || e.Direction != "outside-grant" {
 		t.Errorf("%+v", e)
 	}
 	// an empty grant still delegates p: nothing may run as p
 	e = wantErr[ErrDelegationUid](t, grantsLayers(asOps(), "", "grant \"ops\" {\n  }"))
-	if e.Direction != "p-not-granted" {
+	if e.Direction != "outside-grant" {
+		t.Errorf("%+v", e)
+	}
+	// E1: grants of distinct principals are disjoint; a in two grants runs as
+	// at most one of them, so the other direction fires
+	e = wantErr[ErrDelegationUid](t, grantsLayers(asOps(), "", grantA+"\n  grant \"alice\" {\n    services = [\"a\"]\n  }"))
+	if e.Service != "a" || e.Principal != "alice" || e.Direction != "granted" {
 		t.Errorf("%+v", e)
 	}
 	// a grant to a principal who is not an admin
@@ -723,7 +746,7 @@ func TestGrantClosureOverEveryEdgeKind(t *testing.T) {
 				extra += "\n  wait {\n    timeout = \"10m\"\n  }"
 			}
 			e := wantErr[ErrGrantNotClosed](t, grantsLayers(asOps(), extra, grantA))
-			if e.Principal != "ops" || e.Granted != "a" || e.Requirer != "b" || e.Edge != kind {
+			if e.Principal != "ops" || e.Granted != "a" || e.Dependent != "b" || e.Edge != kind {
 				t.Errorf("%+v", e)
 			}
 		})

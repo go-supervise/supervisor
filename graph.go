@@ -118,8 +118,8 @@ func sccs(names []string, adj map[string][]string) [][]string {
 	return out
 }
 
-// waitBudget is the predicate of section 1.6 (M5, N4, D6): for every
-// require-target B of A, wait.timeout(A) >= U(B), with
+// waitBudget is the predicate of section 1.6 (M5, N4, D6, E9): for every
+// service A with a require-target, wait.timeout(A) >= W(A), with
 //
 //	U(B) = W(B) + SW(B) + stop(B) + kill(B) + backoff.max(B) + start(B)
 //	W(A) = max over every target C of A, of any edge kind, of U(C)
@@ -155,15 +155,18 @@ func (c *compiler) waitBudget(plan *Plan, names []string, adj, rev map[string][]
 		return memoU[b]
 	}
 	for _, a := range names {
-		need := int64(0)
+		hasReq := false
 		for _, b := range adj[a] {
 			if lvl[[2]string{a, b}] == LevelRequired {
-				need = max(need, u(b))
+				hasReq = true
 			}
 		}
-		if need == 0 {
+		if !hasReq {
 			continue
 		}
+		// E9: every service with a require-target is checked against W(A),
+		// which ranges over require, want and order targets.
+		need := w(a)
 		if have, ok := plan.Services[a].Resolved["wait.timeout"]; ok && have < need {
 			c.errs.add(ErrWaitTooShort{Service: a, Have: have, Need: need})
 		}
@@ -207,9 +210,9 @@ func (c *compiler) grants(plan *Plan, names []string) {
 			runsAsP := u.Set && len(u.Strs) == 1 && u.Strs[0] == p
 			switch {
 			case granted && !runsAsP:
-				c.errs.add(ErrDelegationUid{Service: s, Principal: p, Direction: "granted-not-p"})
+				c.errs.add(ErrDelegationUid{Service: s, Principal: p, Direction: "granted"})
 			case !granted && runsAsP:
-				c.errs.add(ErrDelegationUid{Service: s, Principal: p, Direction: "p-not-granted"})
+				c.errs.add(ErrDelegationUid{Service: s, Principal: p, Direction: "outside-grant"})
 			}
 		}
 		for _, b := range names {
@@ -218,7 +221,7 @@ func (c *compiler) grants(plan *Plan, names []string) {
 			}
 			for a, l := range edges(plan.Services[b]) {
 				if slices.Contains(g.Strs, a) {
-					c.errs.add(ErrGrantNotClosed{Principal: p, Granted: a, Requirer: b, Edge: edgeNames[l]})
+					c.errs.add(ErrGrantNotClosed{Principal: p, Granted: a, Dependent: b, Edge: edgeNames[l]})
 				}
 			}
 		}
