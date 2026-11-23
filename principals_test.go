@@ -556,15 +556,38 @@ func TestWarningsAcrossPrincipalsAreSorted(t *testing.T) {
 	}
 }
 
+func TestNeverFailingLoopSkipsAConflictedTimer(t *testing.T) {
+	// stop.timeout = 200s is outside the met interval: a conflict, so the
+	// timer has no resolved value and the loop is not judged on a partial sum
+	l := base()
+	l[0].Source = []byte(svcRecipe("web", "intensity {\n    max = 3\n    window = \"1s\"\n  }"))
+	l = plus(l, site("tune.hcl", "service \"web\" {\n  stop {\n    timeout = \"200s\"\n  }\n}"))
+	sawConflict := false
+	for _, e := range errsOf(mustErr(t, l)) {
+		switch e.(type) {
+		case ErrConflict:
+			sawConflict = true
+		case ErrNeverFailingLoop:
+			t.Errorf("a loop was judged on an unresolved timer: %v", e)
+		}
+	}
+	if !sawConflict {
+		t.Error("expected the timer conflict")
+	}
+}
+
 func TestBudgetBlockNeedsItsParts(t *testing.T) {
-	// a non-literal value and an unlabelled block are refused, and keep no budget
+	// one refusal each, and nothing kept from the refused block or value
 	for _, src := range []string{
 		"api {\n budget \"p\" {\n  pids = var.x\n }\n}\n",
-		"api {\n budget \"p\" {\n  pids = 1\n  memory = var.x\n }\n}\n",
+		// a refused value does not stop the other attributes, nor add to its own
+		"api {\n budget \"p\" {\n  memory = var.x\n  pids = 1\n }\n}\n",
+		// an unlabelled or badly named block is refused once, body unread
+		"api {\n budget {\n  nope = 1\n }\n}\n",
+		"api {\n budget \"bad name!\" {\n  nope = 1\n }\n}\n",
 	} {
-		d, errs := ParseLayer(site("s.hcl", src))
-		if len(errs) == 0 {
-			t.Errorf("%q parsed: %+v", src, d.API)
+		if _, errs := ParseLayer(site("s.hcl", src)); len(errs) != 1 {
+			t.Errorf("%q: %d errors: %v", src, len(errs), errs)
 		}
 	}
 }
