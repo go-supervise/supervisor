@@ -44,8 +44,9 @@ type ErrSchemaTooNew struct{ Baseline, Running int }
 // delegated principal p if and only if it is in grant(p).
 type ErrDelegationUid struct {
 	Service, Principal string
-	// Direction is "granted" (in grant(p) but runs as another uid) or
-	// "outside-grant" (runs as p but is outside grant(p)).
+	// Direction is "granted" (in grant(p) but runs as another uid),
+	// "outside-grant" (runs as p but is outside grant(p)) or "reader" (runs
+	// as a principal that only reads).
 	Direction string
 }
 
@@ -54,6 +55,48 @@ type ErrDelegationUid struct {
 type ErrGrantNotClosed struct {
 	Principal, Granted, Dependent string
 	Edge                          string // "require", "want" or "order"
+}
+
+// ErrPrincipalClass is F4 (draft 9): a principal in api.admin (owner-class)
+// with a non-empty grant would be owner-class and delegated at once.
+type ErrPrincipalClass struct{ Principal string }
+
+// ErrDelegationPrivilege is F2a (draft 9): a granted service holds nothing
+// beyond its grantee. What is "capabilities", "nnp" or "groups".
+type ErrDelegationPrivilege struct{ Service, Principal, What string }
+
+// ErrNeverFailingLoop is P2b (draft 9, F5): Window <= max * U(A), so a crash
+// loop can drain its window and never reach Failed(intensity). Need is the
+// smallest window that is accepted, in nanoseconds.
+type ErrNeverFailingLoop struct {
+	Service      string
+	Window, Need int64 // nanoseconds
+}
+
+// Warning is a diagnostic that does not refuse the plan.
+type Warning interface {
+	warning()
+	String() string
+}
+
+// WarnUnheldOutsideTarget (F3, section 2.3): an enabled granted Service
+// requires Target, outside its grant, which is not enabled, so Service cannot
+// come up at boot unless the owner starts Target.
+type WarnUnheldOutsideTarget struct{ Service, Target string }
+
+func (WarnUnheldOutsideTarget) warning() {}
+func (w WarnUnheldOutsideTarget) String() string {
+	return fmt.Sprintf("WarnUnheldOutsideTarget: %s requires %s, outside its grant, which is not enabled", w.Service, w.Target)
+}
+
+func (e ErrPrincipalClass) Error() string {
+	return "ErrPrincipalClass: " + e.Principal + " is in api.admin and has a grant"
+}
+func (e ErrDelegationPrivilege) Error() string {
+	return fmt.Sprintf("ErrDelegationPrivilege: %s (%s) granted to %s", e.Service, e.What, e.Principal)
+}
+func (e ErrNeverFailingLoop) Error() string {
+	return fmt.Sprintf("ErrNeverFailingLoop: %s: intensity.window %dns, need at least %dns", e.Service, e.Window, e.Need)
 }
 
 func (e ErrSyntax) Error() string { return fmt.Sprintf("ErrSyntax: %s: %s", e.Layer, e.Msg) }

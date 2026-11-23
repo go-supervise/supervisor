@@ -28,6 +28,9 @@ type Plan struct {
 	Schema   int
 	API      map[string]Value
 	Services map[string]*ServicePlan
+	// Warnings are the diagnostics that do not refuse the plan (section 1.10),
+	// sorted by message.
+	Warnings []Warning
 }
 
 // ServicePlan is one service after the meet and the resolution.
@@ -88,17 +91,7 @@ func Compile(layers []Layer, opts Options) (*Plan, error) {
 
 // admit checks admission and parses; it reports whether compilation can go on.
 func (c *compiler) admit(layers []Layer) bool {
-	type key struct {
-		a    Authority
-		n, s string
-	}
-	seen := map[key]bool{}
 	for _, l := range layers {
-		k := key{l.Authority, l.Name, string(l.Source)}
-		if seen[k] {
-			continue
-		}
-		seen[k] = true
 		switch {
 		case l.Authority != Recipe && l.Authority != Site:
 			c.errs.add(ErrNotALatticeValue{Layer: l.Name, Key: "authority", Why: "a layer is a recipe or a site layer"})
@@ -188,7 +181,8 @@ func (c *compiler) stated(s, path string) []stmt {
 				out = append(out, stmt{d.Layer.Name, v})
 			}
 		}
-		if v, ok := d.All[path]; ok && d.Layer.Authority == Site {
+		// only a site layer parses an all block, so d.All is empty otherwise
+		if v, ok := d.All[path]; ok {
 			out = append(out, stmt{d.Layer.Name, v})
 		}
 	}
@@ -296,6 +290,8 @@ func (c *compiler) services() *Plan {
 	}
 	c.graph(plan, names)
 	c.grants(plan, names)
+	c.principals(plan, names)
+	sort.Slice(plan.Warnings, func(i, j int) bool { return plan.Warnings[i].String() < plan.Warnings[j].String() })
 	return plan
 }
 
@@ -429,9 +425,13 @@ func (c *compiler) complete(s string, sp *ServicePlan) {
 		}
 	}
 	check := false
+	intensity := false
 	for p, def := range c.sc.fields {
 		if def.Req == ReqCheck && sp.Fields[p].Set {
 			check = true
+		}
+		if def.Req == ReqIntensity && sp.Fields[p].Set {
+			intensity = true
 		}
 	}
 	for p, def := range c.sc.fields {
@@ -447,6 +447,10 @@ func (c *compiler) complete(s string, sp *ServicePlan) {
 			}
 		case ReqCheck:
 			if check {
+				need(p)
+			}
+		case ReqIntensity:
+			if intensity {
 				need(p)
 			}
 		}
@@ -498,7 +502,36 @@ func (c *compiler) predicates(s string, sp *ServicePlan) {
 	if u := f["run_as.user"]; c.opts.UserMode && u.Set && len(u.Strs) == 1 && u.Strs[0] != c.opts.Owner {
 		c.errs.add(ErrRunAsInUserMode{Service: s, RunAs: u.Strs[0], Owner: c.opts.Owner})
 	}
+	c.neverFailing(s, sp)
 	c.params(s, f)
+}
+
+// neverFailing is P2b (draft 9, F5): a window no longer than max charges can
+// take lets a crash loop drain between charges and never overflow.
+//
+//	window <= max * U(A) is ErrNeverFailingLoop, with need = max * U(A) + 1s
+//
+// U(A) = start + stop + kill + backoff.max, all resolved. Nothing is checked
+// until every operand has resolved: that is already ErrIncomplete or ErrConflict.
+func (c *compiler) neverFailing(s string, sp *ServicePlan) {
+	r := sp.Resolved
+	max, ok1 := r["intensity.max"]
+	window, ok2 := r["intensity.window"]
+	if !ok1 || !ok2 {
+		return
+	}
+	var parts []int64
+	for _, p := range []string{"start.timeout", "stop.timeout", "kill.timeout", "backoff.max"} {
+		v, ok := r[p]
+		if !ok {
+			return
+		}
+		parts = append(parts, v)
+	}
+	span := satMul(max, satAdd(parts...))
+	if window <= span {
+		c.errs.add(ErrNeverFailingLoop{Service: s, Window: window, Need: satAdd(span, int64(time.Second))})
+	}
 }
 
 func (c *compiler) layerNames(s string, paths ...string) []string {

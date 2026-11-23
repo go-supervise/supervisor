@@ -14,6 +14,11 @@ schema = 1
 api {
   admin = ["alice"]
   read  = ["alice", "bob"]
+  budget "bob" {
+    connections = 4
+    inflight    = 8
+    refusals    = 10
+  }
 }
 all {
   limits {

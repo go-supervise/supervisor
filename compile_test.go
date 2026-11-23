@@ -693,8 +693,7 @@ func TestWaitBudgetCoversWantTargetsOfARequirer(t *testing.T) {
 }
 
 func grantsLayers(extraRecipeA, extraRecipeB, grant string) []Layer {
-	b := strings.Replace(baseline, `admin = ["alice"]`, `admin = ["alice", "ops"]`, 1)
-	b = strings.Replace(b, "api {", "api {\n  "+grant, 1)
+	b := strings.Replace(baseline, "api {", "api {\n  "+opsBudget+"\n  "+grant, 1)
 	return []Layer{
 		rec("recipe.hcl", svcRecipe("a", extraRecipeA)+svcRecipe("b", extraRecipeB)),
 		site("site.hcl", b+svcSite("a", "")+svcSite("b", "")),
@@ -703,7 +702,13 @@ func grantsLayers(extraRecipeA, extraRecipeB, grant string) []Layer {
 
 const grantA = "grant \"ops\" {\n    services = [\"a\"]\n  }"
 
-func asOps() string { return "run_as {\n    user = \"ops\"\n  }" }
+// opsBudget states every budget of a delegated principal (H_OS-E5).
+const opsBudget = "budget \"ops\" {\n    connections = 4\n    inflight = 8\n    refusals = 10\n    pids = 50\n    memory = 1000000\n  }"
+
+// asOps runs a service as ops with no capability: what a granted service must hold.
+func asOps() string {
+	return "run_as {\n    user = \"ops\"\n  }\n  allow {\n    capabilities = []\n  }"
+}
 
 func TestGrantsRunAsBothWays(t *testing.T) {
 	// consistent: a is granted to ops and runs as ops; b does not
@@ -729,8 +734,6 @@ func TestGrantsRunAsBothWays(t *testing.T) {
 	if e.Service != "a" || e.Principal != "alice" || e.Direction != "granted" {
 		t.Errorf("%+v", e)
 	}
-	// a grant to a principal who is not an admin
-	wantErr[ErrConflict](t, grantsLayers(asOps(), "", strings.Replace(grantA, "ops", "mallory", 1)))
 	// a grant naming no service
 	wantErr[ErrUnknownService](t, grantsLayers(asOps(), "", "grant \"ops\" {\n    services = [\"a\", \"zzz\"]\n  }"))
 	// no grant, no delegation: run_as is free
