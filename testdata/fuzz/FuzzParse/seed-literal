@@ -1,0 +1,2 @@
+go test fuzz v1
+string("service \"x\" {\n  kind = upper(\"a\")\n  stop { timeout = { min = \"1s\", max = \"2s\", prefer = \"3s\" } }\n}\n")
