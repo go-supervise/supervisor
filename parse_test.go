@@ -183,6 +183,10 @@ func TestParseRefusals(t *testing.T) {
 		refuses1[ErrFieldAuthority](t, Site, "all {\n param \"p\" {\n type = \"port\"\n }\n}")
 		refuses1[ErrFieldAuthority](t, Site, "all {\n stop {\n timeout = { min = \"1s\", max = \"2s\", prefer = \"1s\" }\n }\n}")
 	})
+	t.Run("unlabelled credential in a recipe", func(t *testing.T) {
+		// the label is refused once; the body of the block is not read as well
+		refuses1[ErrUnknownKey](t, Recipe, svc("credential {\n source = \"x\"\n}"))
+	})
 	t.Run("forking", func(t *testing.T) { refuses1[ErrForkingDaemon](t, Recipe, svc(`kind = "forking"`)) })
 	t.Run("syntax", func(t *testing.T) { refuses1[ErrSyntax](t, Site, "service \"x\" {") })
 }
@@ -192,6 +196,7 @@ func TestParseRefusals(t *testing.T) {
 func TestParseReasons(t *testing.T) {
 	for src, why := range map[string]string{
 		svc("stop {\n timeout = { min = \"1s\" }\n}"):                           "both min and max",
+		svc("stop {\n timeout = { min = \"1s\", max = 5 }\n}"):                  "duration string",
 		svc("stop {\n timeout = 5\n}"):                                          "duration string",
 		svc("stop {\n timeout = { min = 5, max = 6 }\n}"):                       "duration string",
 		svc("stop {\n timeout = { min = \"1s\", max = \"2s\", prefer = 5 }\n}"): "duration string",

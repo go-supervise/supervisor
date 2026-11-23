@@ -437,27 +437,26 @@ func (p *parser) convertFlat(path string, def fieldDef, cv cty.Value) (Value, bo
 	return Flat(s), true
 }
 
-func (p *parser) point(path string, def fieldDef, cv cty.Value) (int64, bool) {
+// point reads one bound of an interval. It does not report: it returns the
+// reason it refused, "" when it did not, and the caller reports it.
+func point(def fieldDef, cv cty.Value) (int64, string) {
 	switch def.Unit {
 	case UnitDuration:
 		s, ok := strOf(cv)
 		if !ok {
-			p.bad(path, `a duration string such as "30s"`)
-			return 0, false
+			return 0, `a duration string such as "30s"`
 		}
 		d, err := time.ParseDuration(s)
 		if err != nil || d < 0 || int64(d) > durationMax {
-			p.bad(path, "a duration between 0 and one year")
-			return 0, false
+			return 0, "a duration between 0 and one year"
 		}
-		return int64(d), true
+		return int64(d), ""
 	default:
 		n, ok := intOf(cv)
 		if !ok || n < 0 || n > countMax {
-			p.bad(path, "an integer between 0 and 2^31-1")
-			return 0, false
+			return 0, "an integer between 0 and 2^31-1"
 		}
-		return n, true
+		return n, ""
 	}
 }
 
@@ -485,11 +484,13 @@ func (p *parser) convertInterval(path string, def fieldDef, cv cty.Value, inAll 
 			p.bad(path, "an interval states both min and max")
 			return Value{}, false
 		}
-		var ok bool
-		if lo, ok = p.point(path, def, mn); !ok {
+		var why string
+		if lo, why = point(def, mn); why != "" {
+			p.bad(path, why)
 			return Value{}, false
 		}
-		if hi, ok = p.point(path, def, mx); !ok {
+		if hi, why = point(def, mx); why != "" {
+			p.bad(path, why)
 			return Value{}, false
 		}
 		if lo > hi {
@@ -501,8 +502,9 @@ func (p *parser) convertInterval(path string, def fieldDef, cv cty.Value, inAll 
 				p.errs = append(p.errs, ErrFieldAuthority{Field: path + ".prefer", Authority: "all"})
 				return Value{}, false
 			}
-			n, ok := p.point(path, def, pv)
-			if !ok {
+			n, why := point(def, pv)
+			if why != "" {
+				p.bad(path, why)
 				return Value{}, false
 			}
 			if n < lo || n > hi {
@@ -512,8 +514,9 @@ func (p *parser) convertInterval(path string, def fieldDef, cv cty.Value, inAll 
 			pref = &n
 		}
 	} else {
-		n, ok := p.point(path, def, cv)
-		if !ok {
+		n, why := point(def, cv)
+		if why != "" {
+			p.bad(path, why)
 			return Value{}, false
 		}
 		lo, hi = n, n
@@ -632,9 +635,14 @@ func (p *parser) paramBlock(blk *hclsyntax.Block, m map[string]Value, inAll bool
 		if typ == "duration" {
 			def.Unit = UnitDuration
 		}
-		lo, ok1 := p.point("param."+name, def, mn)
-		hi, ok2 := p.point("param."+name, def, mx)
-		if !ok1 || !ok2 {
+		lo, whyLo := point(def, mn)
+		hi, whyHi := point(def, mx)
+		for _, why := range []string{whyLo, whyHi} {
+			if why != "" {
+				p.bad("param."+name, why)
+			}
+		}
+		if whyLo != "" || whyHi != "" {
 			return
 		}
 		if lo > hi {
