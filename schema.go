@@ -39,6 +39,7 @@ const (
 	ReqIfRequireEdges     // wait.timeout: only with a require edge
 	ReqCheck              // check.*: all or none
 	ReqHardening          // satisfied by the baseline's totality
+	ReqIntensity          // intensity.*: all or none
 )
 
 type fieldDef struct {
@@ -104,6 +105,11 @@ func defaultSchema() *schema {
 		"check.period":  dur(ReqCheck),
 		"check.rise":    cnt,
 		"check.fall":    cnt,
+
+		// The per-service restart intensity of section 3.3: at most max charges in
+		// any window. P2b (draft 9, F5) needs both, so stating one requires the other.
+		"intensity.max":    {Kind: K2, Class: ClassT, Unit: UnitCount, Since: 1, Req: ReqIntensity},
+		"intensity.window": {Kind: K2, Class: ClassT, Unit: UnitDuration, Since: 1, Req: ReqIntensity},
 
 		"limits.nofile": h(K3, false),
 		"limits.nproc":  h(K3, false),

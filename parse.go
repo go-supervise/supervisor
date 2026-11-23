@@ -766,6 +766,10 @@ func (p *parser) apiBody(b *hclsyntax.Body, api map[string]Value) {
 		put(api, "api."+an, SetOf(K5, l...))
 	}
 	for _, blk := range b.Blocks {
+		if blk.Type == "budget" {
+			p.budgetBlock(blk, api)
+			continue
+		}
 		if blk.Type != "grant" {
 			p.unknown("api." + blk.Type)
 			continue
@@ -794,5 +798,43 @@ func (p *parser) apiBody(b *hclsyntax.Body, api map[string]Value) {
 			// a grant block with no services is the empty grant, not no grant
 			put(api, "api.grant/"+name, SetOf(K5))
 		}
+	}
+}
+
+// budgetFields are the per-principal resource budgets of H_OS-E5 (draft 9,
+// F1). They are class G, so a site layer states them; each is a bound (K3).
+var budgetFields = []string{"connections", "inflight", "refusals", "pids", "memory"}
+
+// readerBudgets are the budgets a reader states; pids and memory bound the
+// trees of a granted subtree, which a reader does not have.
+var readerBudgets = []string{"connections", "inflight", "refusals"}
+
+// budgetBlock parses budget "<principal>" { connections = N ... } into
+// api.budget/<principal>/<field>.
+func (p *parser) budgetBlock(blk *hclsyntax.Block, api map[string]Value) {
+	name, ok := p.label(blk, "budget")
+	if !ok {
+		return
+	}
+	if len(blk.Body.Blocks) != 0 {
+		p.unknown("budget." + name)
+		return
+	}
+	for _, an := range sortedAttrNames(blk.Body) {
+		if !slices.Contains(budgetFields, an) {
+			p.unknown("budget." + an)
+			continue
+		}
+		key := "budget." + name + "." + an
+		cv, ok := p.literal(blk.Body.Attributes[an].Expr, key)
+		if !ok {
+			continue
+		}
+		n, ok := intOf(cv)
+		if !ok || n < 0 || n > countMax {
+			p.bad(key, "an integer between 0 and 2^31-1")
+			continue
+		}
+		put(api, "api.budget/"+name+"/"+an, Bound(n))
 	}
 }

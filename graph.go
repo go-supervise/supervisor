@@ -20,6 +20,14 @@ func satAdd(xs ...int64) int64 {
 	return t
 }
 
+// satMul is a * b for a, b >= 0, saturating at MaxInt64.
+func satMul(a, b int64) int64 {
+	if a != 0 && b > math.MaxInt64/a {
+		return math.MaxInt64
+	}
+	return a * b
+}
+
 // edges returns the resolved edges of a service: target -> level.
 func edges(sp *ServicePlan) map[string]int64 {
 	out := map[string]int64{}
@@ -190,9 +198,13 @@ func (c *compiler) grants(plan *Plan, names []string) {
 	admin := plan.API["api.admin"]
 	for _, p := range principals {
 		g := plan.API["api.grant/"+p]
-		if !slices.Contains(admin.Strs, p) {
-			c.errs.add(ErrConflict{Path: "api.grant/" + p, Values: []string{"grant to a principal that is not in api.admin"},
-				Layers: c.siteLayerNames()})
+		// F4: delegated (grant(p) != {}) is disjoint from owner-class (api.admin).
+		if len(g.Strs) > 0 && slices.Contains(admin.Strs, p) {
+			c.errs.add(ErrPrincipalClass{Principal: p})
+		}
+		if len(g.Strs) > 0 {
+			c.privileges(plan, p, g.Strs)
+			c.unheld(plan, names, p, g.Strs)
 		}
 		for _, m := range g.Strs {
 			sp, ok := plan.Services[m]
@@ -204,7 +216,13 @@ func (c *compiler) grants(plan *Plan, names []string) {
 				c.errs.add(ErrFieldAuthority{Field: m + ".terminal", Authority: "grant"})
 			}
 		}
-		for _, s := range names {
+		// An owner-class principal with an empty grant is not delegated: the
+		// owner's own services may run as it.
+		runners := names
+		if len(g.Strs) == 0 && slices.Contains(admin.Strs, p) {
+			runners = nil
+		}
+		for _, s := range runners {
 			granted := slices.Contains(g.Strs, s)
 			u := plan.Services[s].Fields["run_as.user"]
 			runsAsP := u.Set && len(u.Strs) == 1 && u.Strs[0] == p
