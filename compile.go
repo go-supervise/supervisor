@@ -91,17 +91,7 @@ func Compile(layers []Layer, opts Options) (*Plan, error) {
 
 // admit checks admission and parses; it reports whether compilation can go on.
 func (c *compiler) admit(layers []Layer) bool {
-	type key struct {
-		a    Authority
-		n, s string
-	}
-	seen := map[key]bool{}
 	for _, l := range layers {
-		k := key{l.Authority, l.Name, string(l.Source)}
-		if seen[k] {
-			continue
-		}
-		seen[k] = true
 		switch {
 		case l.Authority != Recipe && l.Authority != Site:
 			c.errs.add(ErrNotALatticeValue{Layer: l.Name, Key: "authority", Why: "a layer is a recipe or a site layer"})
@@ -191,7 +181,8 @@ func (c *compiler) stated(s, path string) []stmt {
 				out = append(out, stmt{d.Layer.Name, v})
 			}
 		}
-		if v, ok := d.All[path]; ok && d.Layer.Authority == Site {
+		// only a site layer parses an all block, so d.All is empty otherwise
+		if v, ok := d.All[path]; ok {
 			out = append(out, stmt{d.Layer.Name, v})
 		}
 	}
