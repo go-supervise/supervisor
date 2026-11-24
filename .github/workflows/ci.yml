@@ -26,7 +26,26 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: test -z "$(gofmt -l .)"
       - run: go vet ./...
-      - run: go test -count=1 ./...
+      # -short leaves out the Gate 1 enumerations of Theorem C (minutes of CPU),
+      # which the gate1 job below runs in full: it is a mandatory check, not a skip.
+      - run: go test -short -count=1 ./...
+
+  # Gate 1 (SUPERVISOR.md section 3.8): Theorem U and the frame lemmas F1..F6
+  # over their whole neighbourhoods, with every witness, without -short.
+  gate1:
+    name: gate1 (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.25", "1.27"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ matrix.go }}
+      - run: go test -count=1 -timeout 35m ./...
 
   govulncheck:
     runs-on: ubuntu-latest
