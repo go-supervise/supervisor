@@ -81,9 +81,7 @@ func GenerateSysNum(dir, arch string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(pkgs) != 1 || pkgs[0].Types == nil {
-		return "", fmt.Errorf("surface: cannot load %s for %s", unixPath, arch)
-	}
+	// one import path, one root package (packages.Load's contract)
 	if len(pkgs[0].Errors) > 0 {
 		return "", fmt.Errorf("surface: cannot load %s for %s: %v", unixPath, arch, pkgs[0].Errors[0])
 	}

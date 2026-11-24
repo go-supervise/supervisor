@@ -28,21 +28,30 @@ func TestSourceHalfRefusesWhatItCannotLoad(t *testing.T) {
 	if testing.Short() {
 		t.Skip("loads packages (the gate1 job runs it)")
 	}
-	_, err := SourceHalf(Options{Dir: filepath.Join(t.TempDir(), "absent"), GOARCH: "amd64"})
+	load := func(o Options) (err error) {
+		defer func() { // a crash is a failed assertion
+			if p := recover(); p != nil {
+				t.Errorf("%+v crashed: %v", o, p)
+			}
+		}()
+		_, err = SourceHalf(o)
+		return err
+	}
+	err := load(Options{Dir: filepath.Join(t.TempDir(), "absent"), GOARCH: "amd64"})
 	if err == nil || strings.HasPrefix(err.Error(), "surface:") {
 		t.Errorf("an absent directory: %v", err)
 	}
-	_, err = SourceHalf(Options{Dir: "../..", Entry: fixPkg + "absent", GOARCH: "amd64"})
+	err = load(Options{Dir: "../..", Entry: fixPkg + "absent", GOARCH: "amd64"})
 	if err == nil || !strings.HasPrefix(err.Error(), "surface: ") || !strings.HasSuffix(err.Error(), " package errors loading "+fixPkg+"absent") {
 		t.Errorf("an absent entry: %v", err)
 	}
 	// x/sys/unix is always loaded beside the entry: an entry that is only it
 	// leaves no package of its own
-	_, err = SourceHalf(Options{Dir: "../..", Entry: unixPath, GOARCH: "amd64"})
+	err = load(Options{Dir: "../..", Entry: unixPath, GOARCH: "amd64"})
 	if want := "surface: " + unixPath + " matched no package"; err == nil || err.Error() != want {
 		t.Errorf("an entry that is only x/sys/unix: %v, want %q", err, want)
 	}
-	_, err = SourceHalf(Options{Dir: "../..", Entry: fixPkg + "...", GOARCH: "amd64"})
+	err = load(Options{Dir: "../..", Entry: fixPkg + "...", GOARCH: "amd64"})
 	if want := "surface: " + fixPkg + "... matched more than one package"; err == nil || err.Error() != want {
 		t.Errorf("a pattern matching several: %v, want %q", err, want)
 	}
@@ -111,6 +120,32 @@ func TestForkChildNeedsAPackage(t *testing.T) {
 			t.Error("a function with no package is not fork-child code")
 		}
 	})
+}
+
+func TestForkChildIsSyscallsOwnCode(t *testing.T) {
+	prog := ssa.NewProgram(token.NewFileSet(), 0)
+	pkgOf := func(path string) *ssa.Package {
+		return prog.CreatePackage(types.NewPackage(path, path), nil, nil, true)
+	}
+	sig := types.NewSignatureType(nil, nil, nil, nil, nil, false)
+	fn := func(p *ssa.Package, name string) *ssa.Function {
+		f := prog.NewFunction(name, sig, "test")
+		f.Pkg = p
+		return f
+	}
+	sys, other := pkgOf("syscall"), pkgOf("example.test/syscall")
+	for name, want := range map[string]bool{
+		"writeUidGidMappings": true, "writeIDMappings": true, "writeSetgroups": true,
+		"forkAndExecInChild": true, "forkAndExecInChild1": true,
+		"forkExec": false, "Kill": false, "": false,
+	} {
+		if got := forkChild(fn(sys, name)); got != want {
+			t.Errorf("syscall.%s: %v, want %v", name, got, want)
+		}
+		if forkChild(fn(other, name)) {
+			t.Errorf("another package's %s is not fork-child code", name)
+		}
+	}
 }
 
 func TestOnlyFromForkChildNeedsCallers(t *testing.T) {
