@@ -49,6 +49,10 @@ jobs:
       # toolchain (go 1.27): its R_go tables are generated per toolchain, and
       # go 1.25's standard library reaches mprotect where 1.27's does not. So the
       # surface packages run on 1.27 only; every other package runs on both.
+      # cmd/svd-monitor itself builds only under go 1.27 (a build constraint; any
+      # other toolchain gets a stub that refuses to run), so no unjudged build of
+      # M_p exists, and the gate refuses a build whose toolchain is not the one
+      # stamped in rgo_*.txt.
       - name: every package but the syscall-surface gate
         run: go test -count=1 -timeout 35m . ./cmd/svd/ ./cmd/svd-monitor/ ./fsm/ ./internal/fdlayout/ ./internal/frame/ ./internal/helper/ ./internal/keyring/ ./internal/monitor/ ./internal/spawn/ ./internal/stagestub/
       - name: the syscall-surface gate (source and symbol halves)

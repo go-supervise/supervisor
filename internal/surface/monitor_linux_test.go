@@ -3,6 +3,7 @@
 package surface
 
 import (
+	"debug/buildinfo"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +26,19 @@ func buildHost(t *testing.T, out, pkg string, flags ...string) {
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build %s: %v\n%s", pkg, err, b)
+	}
+}
+
+// builtByRelease fails unless the binary was built by the toolchain R_go was
+// generated for: what is judged must be what the release toolchain builds.
+func builtByRelease(t *testing.T, bin string) {
+	t.Helper()
+	bi, err := buildinfo.ReadFile(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckToolchain(bi.GoVersion, runtime.GOARCH); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -55,6 +69,7 @@ func monitorSymbols(t *testing.T, tags ...string) *Result {
 		flags = []string{"-tags=" + strings.Join(tags, ",")}
 	}
 	buildHost(t, bin, "./cmd/svd-monitor", flags...)
+	builtByRelease(t, bin)
 	r, err := SymbolAbsence(bin)
 	if err != nil {
 		t.Fatal(err)
@@ -84,6 +99,7 @@ func surfaceTools(t *testing.T, dir string, tags ...string) RunOptions {
 		flags = []string{"-tags=" + strings.Join(tags, ",")}
 	}
 	buildHost(t, o.Monitor, "./cmd/svd-monitor", flags...)
+	builtByRelease(t, o.Monitor)
 	// Under the recorder every system call stops, so the stub's start-up runs
 	// long enough for Go's sysmon to preempt it with a tgkill of its own tgid,
 	// which the filter (built for M_p's tgid) answers with SIGSYS. The stub

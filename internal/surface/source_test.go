@@ -66,6 +66,37 @@ func TestSourceHalfFixtures(t *testing.T) {
 	}
 }
 
+// The hardening fixtures: each must make the source half red, naming what it
+// refused. (An identity change through the all-threads path, a number that is
+// not constant behind it, a function with no body, assembly in the module, and
+// a SysProcAttr field set through a package variable or a loaded pointer.)
+func TestSourceHalfRefusesWhatItCouldNotSee(t *testing.T) {
+	cases := []struct {
+		name string
+		want []string
+	}{
+		{"setid", []string{`reached system call "setuid" at ` + fixDir + `setid/main.go:`, `(never allowed)`}},
+		{"allthreadsnr", []string{`non-constant system-call number at ` + fixDir + `allthreadsnr/main.go:`}},
+		{"asm", []string{`has no Go body`, `asm.raw`, `holds the non-Go file raw_amd64.s`}},
+		{"attrglobal", []string{`SysProcAttr field Credential set at ` + fixDir + `attrglobal/main.go:`}},
+		{"attrloaded", []string{`SysProcAttr field Chroot set at ` + fixDir + `attrloaded/main.go:`}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := source(t, "amd64", c.name)
+			all := strings.Join(r.Failures, "\n")
+			if all == "" {
+				t.Fatalf("the source half is green on %s (reached %v)", c.name, r.Reached)
+			}
+			for _, w := range c.want {
+				if !strings.Contains(all, w) {
+					t.Errorf("failures lack %q:\n%s", w, all)
+				}
+			}
+		})
+	}
+}
+
 // Go's fork child behind an allowed SysProcAttr is exempt; the same fixture on
 // both architectures, whose system-call tables differ.
 func TestSourceHalfForkChildIsGatedByTheAttr(t *testing.T) {

@@ -49,6 +49,9 @@ const (
 	BadService
 	BadSignal
 	BadEpoch // Refuse
+	// ServiceLive is a Refuse of M_p's own loop, not of Decode: a spawn for a
+	// service whose previous child has not been acknowledged as reaped.
+	ServiceLive
 )
 
 // Record is the decoded form.

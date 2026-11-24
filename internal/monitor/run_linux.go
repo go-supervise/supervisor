@@ -155,6 +155,12 @@ func serve(f Fds, h Host, cfg *Config, limits map[string]string, st *State, live
 	svc := strconv.FormatUint(uint64(r.Service), 10)
 	switch r.Kind {
 	case KindSpawn:
+		if live[r.Service] != nil {
+			// the previous child is still held (its descriptors, its cgroup):
+			// starting another would overwrite it and leak both
+			say(f.Status, "R "+strconv.Itoa(int(ServiceLive))+"\n")
+			return
+		}
 		st.Services[r.Service].LastEpoch = r.Epoch
 		epoch := "s" + svc + "e" + strconv.FormatUint(r.Epoch, 10)
 		notify := cfg.NotifyName + epoch

@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -49,6 +50,34 @@ var sinks = map[string]bool{
 	unixPath + ".RawSyscall6": true, unixPath + ".SyscallNoError": true,
 	unixPath + ".RawSyscallNoError":     true,
 	"internal/runtime/syscall.Syscall6": true,
+	// the all-threads variants (set*id and set groups go through them); the
+	// number is the first argument of each, and the bodyless target is the
+	// runtime's own entry.
+	"syscall.AllThreadsSyscall": true, "syscall.AllThreadsSyscall6": true,
+	"syscall.runtime_doAllThreadsSyscall": true,
+}
+
+// stdlibPath reports whether an import path belongs to the Go standard
+// library (no dot in its first element); a module path always has one.
+func stdlibPath(p string) bool {
+	first, _, _ := strings.Cut(p, "/")
+	return !strings.Contains(first, ".")
+}
+
+// bodylessAllowed are the exact functions outside the standard library that may
+// have no Go body (assembly or linkname). A reached function with no body is
+// invisible to the call graph, so each one must be listed; the standard
+// library's own are the runtime's and are judged by the dynamic half (R_go).
+var bodylessAllowed = map[string]bool{}
+
+// noBody reports whether f is a reached Go function declared without a body
+// that is neither a sink, nor the standard library's, nor allowlisted.
+func noBody(f *ssa.Function) bool {
+	if f.Pkg == nil || f.Synthetic != "" || len(f.Blocks) > 0 {
+		return false
+	}
+	name := qname(f)
+	return !sinks[name] && !stdlibPath(f.Pkg.Pkg.Path()) && !bodylessAllowed[name]
 }
 
 // openers are the dirfd-taking open calls whose first argument must not be
@@ -67,6 +96,15 @@ var unresolvable = map[string]bool{
 // qname is the function's full name: "path.Name", or "(T).Name" for a method.
 func qname(f *ssa.Function) string { return f.String() }
 
+// goVersionOf names the toolchain that builds dir under env; a variable so a
+// test can stand another toolchain in.
+var goVersionOf = func(dir string, env []string) (string, error) {
+	gv := exec.Command("go", "env", "GOVERSION")
+	gv.Dir, gv.Env = dir, env
+	out, err := gv.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
 // SourceHalf is half 1 of 7.1.2: the system calls reachable from the entry's
 // main over the VTA call graph of the whole program, each with a constant
 // number, checked against A_M u R_go and Never.
@@ -75,6 +113,15 @@ func SourceHalf(o Options) (*Result, error) {
 		o.Entry = "./cmd/svd-monitor"
 	}
 	env := append(os.Environ(), "GOOS=linux", "GOARCH="+o.GOARCH, "CGO_ENABLED=0")
+	// the analysed program is the one this toolchain builds: it must be the
+	// toolchain the R_go table was generated for
+	built, err := goVersionOf(o.Dir, env)
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckToolchain(built, o.GOARCH); err != nil {
+		return nil, err
+	}
 	var flags []string
 	if len(o.Tags) > 0 {
 		flags = []string{"-tags=" + strings.Join(o.Tags, ",")}
@@ -269,6 +316,9 @@ func (a *analysis) checkSites() {
 		if unresolvable[f.String()] {
 			a.fail("unresolved call %s is reachable (%s)", f.String(), a.chainSite(f))
 		}
+		if noBody(f) {
+			a.fail("reached function %s has no Go body (%s)", f.String(), a.chainSite(f))
+		}
 		n := a.g.Nodes[f]
 		if n == nil {
 			continue
@@ -385,32 +435,55 @@ func (a *analysis) compare() {
 	}
 }
 
-// checkAttr refuses every syscall.SysProcAttr allocated in reached code that
-// is not a plain literal setting only AllowedAttr fields.
+// checkAttr refuses, in every reached function outside the standard library,
+// each access to a syscall.SysProcAttr field outside AllowedAttr, whatever the
+// base (a local, a package variable, a struct holding one, a pointer loaded
+// back), and every SysProcAttr allocated there that is not a plain literal.
 func (a *analysis) checkAttr() {
 	ok := Set(AllowedAttr)
+	field := func(in ssa.Instruction, x ssa.Value, idx int) {
+		t := x.Type()
+		if p, isPtr := t.Underlying().(*types.Pointer); isPtr {
+			t = p.Elem()
+		}
+		if !isSysProcAttrStruct(t) {
+			return
+		}
+		if name := t.Underlying().(*types.Struct).Field(idx).Name(); !ok[name] {
+			a.fail("SysProcAttr field %s set at %s", name, a.pos(in.Pos()))
+		}
+	}
 	for _, f := range a.order {
+		if f.Pkg == nil || stdlibPath(f.Pkg.Pkg.Path()) {
+			continue
+		}
 		for _, b := range f.Blocks {
 			for _, in := range b.Instrs {
-				al, isAlloc := in.(*ssa.Alloc)
-				if !isAlloc || !isSysProcAttr(al.Type()) {
-					continue
-				}
-				for _, r := range *al.Referrers() {
-					switch r := r.(type) {
-					case *ssa.FieldAddr:
-						st := r.X.Type().Underlying().(*types.Pointer).Elem().Underlying().(*types.Struct)
-						if name := st.Field(r.Field).Name(); !ok[name] {
-							a.fail("SysProcAttr field %s set at %s", name, a.pos(r.Pos()))
+				switch in := in.(type) {
+				case *ssa.FieldAddr:
+					field(in, in.X, in.Field)
+				case *ssa.Field:
+					field(in, in.X, in.Field)
+				case *ssa.Alloc:
+					if !isSysProcAttr(in.Type()) {
+						continue
+					}
+					for _, r := range *in.Referrers() {
+						switch r.(type) {
+						case *ssa.FieldAddr, *ssa.Store, *ssa.DebugRef:
+						default:
+							a.fail("SysProcAttr is not a composite literal at %s", a.pos(r.Pos()))
 						}
-					case *ssa.Store, *ssa.DebugRef:
-					default:
-						a.fail("SysProcAttr is not a composite literal at %s", a.pos(r.Pos()))
 					}
 				}
 			}
 		}
 	}
+}
+
+func isSysProcAttrStruct(t types.Type) bool {
+	n, ok := t.(*types.Named)
+	return ok && n.Obj().Pkg() != nil && n.Obj().Pkg().Path() == "syscall" && n.Obj().Name() == "SysProcAttr"
 }
 
 func isSysProcAttr(t types.Type) bool {
@@ -427,6 +500,13 @@ func (a *analysis) checkImports(pkgs []*packages.Package) {
 	packages.Visit(pkgs, nil, func(p *packages.Package) {
 		if a.module == "" || !strings.HasPrefix(p.PkgPath, a.module+"/") {
 			return
+		}
+		// assembly can issue any system call with no Go call to see
+		for _, o := range p.OtherFiles {
+			switch strings.ToLower(filepath.Ext(o)) {
+			case ".s", ".syso":
+				a.fail("%s holds the non-Go file %s", p.PkgPath, filepath.Base(o))
+			}
 		}
 		for path := range p.Imports {
 			if path == "unsafe" || path == "C" {

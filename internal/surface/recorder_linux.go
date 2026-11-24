@@ -29,7 +29,10 @@ const (
 // tracee is one traced thread; last is the last call it entered. A refused
 // call still gets its exit stop (with an error) before the fatal SIGSYS, so
 // "the call in progress" cannot name it: the last entered call does.
-type tracee struct{ last *Call }
+type tracee struct {
+	last  *Call
+	group int // the thread group (process) the tracee belongs to; 0 until known
+}
 
 // Record starts cmd under ptrace and records, losslessly, every system call
 // every thread and every descendant enters, from the skipExecs-th execve on
@@ -53,7 +56,7 @@ func Record(cmd *exec.Cmd, arch string, skipExecs int, timeout time.Duration, st
 	pid := cmd.Process.Pid
 	names := sysNames(arch)
 	out := &Recording{Leader: pid}
-	tr := map[int]*tracee{pid: {}}
+	tr := map[int]*tracee{pid: {group: pid}}
 	var mu sync.Mutex
 	var timedOut bool
 	timer := time.AfterFunc(timeout, func() {
@@ -106,6 +109,16 @@ func Record(cmd *exec.Cmd, arch string, skipExecs int, timeout time.Duration, st
 			if ws.Signaled() && t.last != nil { // a group kill reports each thread as signaled
 				out.Last = append(out.Last, *t.last)
 			}
+			if ws.Signaled() && ws.Signal() == syscall.Signal(sigSYS) {
+				// the filter killed this tracee: in any process of the tree,
+				// the fork child included, which the leader's own status hides
+				d := Death{Tid: tid, Group: t.group}
+				if t.last != nil {
+					d.Call = *t.last
+					d.HasCall = true
+				}
+				out.Sigsys = append(out.Sigsys, d)
+			}
 			if tid == pid {
 				if ws.Exited() {
 					out.Exit = ws.ExitStatus()
@@ -136,6 +149,13 @@ func Record(cmd *exec.Cmd, arch string, skipExecs int, timeout time.Duration, st
 						mu.Lock()
 						if tr[int(msg)] == nil {
 							tr[int(msg)] = &tracee{}
+						}
+						// a clone is a thread of the parent's process; a fork
+						// or vfork starts a process of its own
+						if ws.TrapCause() == unix.PTRACE_EVENT_CLONE {
+							tr[int(msg)].group = t.group
+						} else {
+							tr[int(msg)].group = int(msg)
 						}
 						mu.Unlock()
 					}

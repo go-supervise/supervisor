@@ -3,6 +3,7 @@ package monitor
 import (
 	"encoding/binary"
 	"errors"
+	"strings"
 )
 
 // ErrConfig is the fixed refusal of a malformed start-up configuration; the
@@ -89,6 +90,9 @@ func ParseConfig(b []byte) (*Config, error) {
 	}
 	for i := 0; i < m && !r.bad; i++ {
 		k := r.str()
+		if !r.bad && !plainName(k) {
+			return nil, ErrConfig
+		}
 		c.Limits = append(c.Limits, [2]string{k, r.str()})
 	}
 	if p := r.take(4); p != nil {
@@ -98,10 +102,17 @@ func ParseConfig(b []byte) (*Config, error) {
 		}
 		c.Plan = r.take(int(pl))
 	}
-	if r.bad || len(r.b) != 0 || len(c.NotifyName) == 0 || len(c.NotifyName) > MaxName {
+	if r.bad || len(r.b) != 0 || len(c.NotifyName) == 0 || len(c.NotifyName) > MaxName || !plainName(c.NotifyName) {
 		return nil, ErrConfig
 	}
 	return c, nil
+}
+
+// plainName reports whether s can be one path component: limit keys and the
+// notify name are opened and bound relative to a directory descriptor, so a
+// name that holds a separator or a NUL, or is "." or "..", would leave it.
+func plainName(s string) bool {
+	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, "/\x00")
 }
 
 // Marshal is ParseConfig's inverse, for the core and for tests.

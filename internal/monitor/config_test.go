@@ -106,8 +106,34 @@ func TestConfigPlanLengthLies(t *testing.T) {
 	}
 }
 
+// Limit keys and the notify name are opened and bound relative to a directory
+// descriptor: a name with a separator or a NUL, or "." or "..", is refused.
+func TestConfigRefusesNamesThatAreNotOneComponent(t *testing.T) {
+	bad := []string{"", ".", "..", "a/b", "/abs", "../x", "x/", "a\x00b"}
+	for _, n := range bad {
+		c := sample()
+		c.NotifyName = n
+		if _, err := ParseConfig(c.Marshal()); !errors.Is(err, ErrConfig) {
+			t.Errorf("notify name %q accepted", n)
+		}
+		c = sample()
+		c.Limits = [][2]string{{n, "1"}}
+		if _, err := ParseConfig(c.Marshal()); !errors.Is(err, ErrConfig) {
+			t.Errorf("limit key %q accepted", n)
+		}
+	}
+	// a value is not a name: it may hold anything the kernel file accepts
+	c := sample()
+	c.Limits = [][2]string{{"memory.max", "a/b"}}
+	if _, err := ParseConfig(c.Marshal()); err != nil {
+		t.Errorf("a limit value with a slash refused: %v", err)
+	}
+}
+
 func FuzzParseConfig(f *testing.F) {
 	f.Add(sample().Marshal())
+	f.Add((&Config{NotifyName: "n", Limits: [][2]string{{"../x", "1"}}}).Marshal())
+	f.Add((&Config{NotifyName: "a/b"}).Marshal())
 	f.Add([]byte{})
 	f.Add(make([]byte, 11))
 	f.Fuzz(func(t *testing.T, b []byte) {
@@ -120,6 +146,15 @@ func FuzzParseConfig(f *testing.F) {
 		}
 		if !bytes.Equal(c.Marshal(), b) {
 			t.Fatalf("accepted input does not round-trip")
+		}
+		names := []string{c.NotifyName}
+		for _, l := range c.Limits {
+			names = append(names, l[0])
+		}
+		for _, n := range names {
+			if n == "" || n == "." || n == ".." || strings.ContainsAny(n, "/\x00") {
+				t.Fatalf("accepted the name %q, which is not one path component", n)
+			}
 		}
 	})
 }

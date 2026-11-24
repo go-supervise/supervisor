@@ -146,6 +146,29 @@ func TestRunServesTheWholeVocabulary(t *testing.T) {
 	}
 }
 
+// A spawn with a newer epoch for a service whose child is still live must be
+// refused: it would overwrite the live entry and leak its descriptors and
+// cgroup. After the reap acknowledgement the next epoch is served.
+func TestRunRefusesASpawnForALiveService(t *testing.T) {
+	r := newRig(t, baseConfig().Marshal())
+	h := &fakeHost{pid: 4242}
+	r.send(rc(rec(KindSpawn, 0, 1, 0, 1, 7)))
+	r.send(rc(rec(KindSpawn, 0, 2, 0, 2, 7))) // newer epoch, child still live
+	r.send(rc(rec(KindReapAck, 0, 1, 0, 3, 7)))
+	r.send(rc(rec(KindSpawn, 0, 2, 0, 4, 7))) // the same epoch again: nothing was consumed
+	r.hangUp()
+	if got := Run(r.fds, h); got != ExitOK {
+		t.Fatalf("exit %d", got)
+	}
+	want := "S 0 4242\nR " + strconv.Itoa(int(ServiceLive)) + "\nK 0\nS 0 4242\n"
+	if got := r.statusText(); got != want {
+		t.Fatalf("status %q, want %q", got, want)
+	}
+	if len(h.starts) != 2 || len(h.reaps) != 1 {
+		t.Fatalf("starts %d reaps %d, want 2 and 1", len(h.starts), len(h.reaps))
+	}
+}
+
 func TestRunReportsAFailedSpawn(t *testing.T) {
 	r := newRig(t, baseConfig().Marshal())
 	h := &fakeHost{failing: true}

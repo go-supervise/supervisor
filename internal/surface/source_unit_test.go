@@ -24,6 +24,29 @@ func noPanic(t *testing.T, what string, f func()) {
 	f()
 }
 
+func TestNoBodyIgnoresWhatHasNoPackage(t *testing.T) {
+	noPanic(t, "noBody of a function with no package", func() {
+		if noBody(&ssa.Function{}) {
+			t.Error("a function with no package is not a bodyless one")
+		}
+	})
+}
+
+func TestSourceHalfRefusesAnotherToolchain(t *testing.T) {
+	was := goVersionOf
+	defer func() { goVersionOf = was }()
+	o := Options{Dir: "../..", Entry: fixPkg + "ok", GOARCH: "amd64"}
+
+	goVersionOf = func(string, []string) (string, error) { return "go1.25.4", nil }
+	if _, err := SourceHalf(o); err == nil || !strings.Contains(err.Error(), "go1.25") {
+		t.Errorf("a toolchain the table was not generated for: %v", err)
+	}
+	goVersionOf = func(string, []string) (string, error) { return "", os.ErrNotExist }
+	if _, err := SourceHalf(o); err != os.ErrNotExist {
+		t.Errorf("a toolchain that cannot be named: %v", err)
+	}
+}
+
 func TestSourceHalfRefusesWhatItCannotLoad(t *testing.T) {
 	if testing.Short() {
 		t.Skip("loads packages (the gate1 job runs it)")
