@@ -20,9 +20,11 @@ func noPanic(t *testing.T, what string, f func()) {
 	f()
 }
 
-// Regression: a state with no enabled guard does not fire (and does not
-// dereference the cell it did not find).
-func TestFireWithNoEnabledGuardIsFalse(t *testing.T) {
+// A crash guard, not a regression of d74ceab (its fire had no nil cell to
+// dereference; the behavioural test that is red there is
+// TestPhaseOneNeverFiresGFree): a state with no enabled guard does not fire and
+// does not dereference the cell it did not find.
+func TestFireWithNoEnabledGuardDoesNotCrash(t *testing.T) {
 	p := newPlan(t, Plan{Svc: []SvcPlan{{Restart: Always}}})
 	r := &run{p: p, w: p.NewWorld(), res: &Result{}}
 	noPanic(t, "fire", func() {

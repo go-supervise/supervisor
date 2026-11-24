@@ -247,9 +247,10 @@ func TestAPIRefusalsInOrder(t *testing.T) {
 	h.fail(Input{Kind: InRestart, By: Delegate, Svc: 0}, ErrGrant)
 	h.fail(Input{Kind: InStart, Now: -1, By: Owner, Targets: 1}, ErrTime)
 
-	// A repeated start is not an error and is not charged (draft 16).
+	// A repeated start is not an error but is a write: it pays R_p like every
+	// write of a delegated principal (section 3.3), here refused by the budget.
 	h.start(Delegate, 2)
-	h.do(Input{Kind: InStart, By: Delegate, Targets: 2})
+	h.fail(Input{Kind: InStart, By: Delegate, Targets: 2}, ErrPrincipalBudget)
 	// The budget refuses a stop before it takes effect, and the world is intact.
 	before := h.w.Clone()
 	h.fail(Input{Kind: InStop, By: Delegate, Targets: 2}, ErrPrincipalBudget)

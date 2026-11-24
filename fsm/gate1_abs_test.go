@@ -12,10 +12,11 @@ import (
 // one window, which is what the passing of time does to a count. A window is
 // kept as a count capped at max+1: every guard compares a count with its
 // maximum, so the cap loses nothing. Deadlines are inputs (kDeadline). Epochs
-// and generations are not part of the key: every token is current, and a
-// stale one is dropped before it reads the world. The state space of ONE copy
-// is then finite; it is built once (every state, every token, one Step), and
-// the pairs are searched over its integer ids until the frontier is empty.
+// and generations are not part of the key: a token is current or one
+// generation behind (staleBehind), and a stale one is dropped before it reads
+// the world. The state space of ONE copy is then finite. Theorem U
+// (gate1_unwind_test.go) is checked over this graph; the pair search below is
+// a smoke test and is never cited as Gate 1.
 
 // ageTok is the K of an AGE token. It is not a Tok of the harness: decode
 // never sees it.
@@ -35,11 +36,25 @@ func ageHigh(p *Plan, idx int) bool {
 	return true
 }
 
+// staleBehind is the C of an event token one epoch and one generation behind
+// the service's (decode): a stale delivery, which the filter must drop without
+// reading the world.
+const staleBehind byte = 4
+
 func abstractTokens(p *Plan) []Tok {
 	var toks []Tok
 	for _, t := range allTokens(p) {
 		if t.K != kTick {
 			toks = append(toks, t)
+		}
+	}
+	// The stale-generation variants of every event (draft 17): an input of the
+	// abstraction, not a counter, so each is one more token.
+	for i := byte(0); i < byte(len(p.Svc)); i++ {
+		for e := byte(0); e < NumEvents; e++ {
+			if Event(e) != Ry && Event(e) != Rs {
+				toks = append(toks, Tok{kEvent, i, e, staleBehind})
+			}
 		}
 	}
 	for idx := 0; idx < len(p.Svc)+2; idx++ {

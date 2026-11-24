@@ -18,13 +18,13 @@ func TestLeakedMemberFailsTheTransaction(t *testing.T) {
 	}
 }
 
-// Regression: an escalation raised inside a round is applied between rounds,
-// so the outcome does not depend on where the escalating service sits in the
-// evaluation order.
-func TestEscalationWaitsForTheEndOfTheRound(t *testing.T) {
-	// Independent services, so every order of them is topological. One is
-	// Terminal and one Restart-Always with a tight budget: both raise an
-	// escalation inside a round.
+// TestEscalationOrderIndependence: an escalation raised inside a round is
+// applied between rounds, so the outcome does not depend on where the
+// escalating service sits in the evaluation order. Independent services, so
+// every order of them is topological, and two of them raise an escalation
+// inside a round. (The case that fails without the fix is
+// TestEscalationWaitsForTheEndOfTheRound, in a2_regression_test.go.)
+func TestEscalationOrderIndependence(t *testing.T) {
 	p := newPlan(t, Plan{MaxInst: 1, Svc: []SvcPlan{
 		{Restart: Always},
 		{Restart: Never, Terminal: true},

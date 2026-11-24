@@ -117,7 +117,10 @@ func (p *Plan) step(w *World, in Input, order []int, rev bool) (*World, *Result,
 		if err := r.round(order, rev); err != nil {
 			return nil, nil, err
 		}
-		again := r.resolveTx()
+		// An escalation raised in the round wins over a rollback: a transaction
+		// that failed in the same round is aborted by Quiescing, as one whose
+		// holder Quiescing clears, and never reaches an outcome (section 2.4).
+		again := r.resolveTx(r.escPending)
 		if r.escPending {
 			r.escalate(r.escStatus)
 			r.escPending, r.escStatus = false, 0
@@ -277,22 +280,25 @@ func (r *run) start(in Input) error {
 	// --no-rollback marks the open transaction of the holder permanent.
 	var fresh uint32
 	for i := range r.w.Svc {
-		if in.Targets&(1<<i) == 0 {
-			continue
-		}
-		if !r.w.Svc[i].H[in.By] {
+		if in.Targets&(1<<i) != 0 && !r.w.Svc[i].H[in.By] {
 			fresh |= 1 << i
-		} else if t := &r.w.Tx[r.p.TxIndex(in.By, i)]; t.Active && in.NoRollback {
+		}
+	}
+	// Every write by a delegated principal is one API charge to R_p, a
+	// repeated start included (section 3.3, "Which writes pay R_p"): it is
+	// refused, before it takes effect, when it would overflow the budget.
+	if in.By == Delegate {
+		if err := r.apiCharge(); err != nil {
+			return err
+		}
+	}
+	for i := range r.w.Svc {
+		if t := &r.w.Tx[r.p.TxIndex(in.By, i)]; in.Targets&(1<<i) != 0 && fresh&(1<<i) == 0 && t.Active && in.NoRollback {
 			t.NoRollback = true
 		}
 	}
 	if fresh == 0 {
 		return nil
-	}
-	if in.By == Delegate {
-		if err := r.apiCharge(); err != nil {
-			return err
-		}
 	}
 	for i := range r.w.Svc {
 		if fresh&(1<<i) == 0 {
@@ -409,7 +415,9 @@ func (r *run) endTx(q int, out TxOut) bool {
 
 // resolveTx ends every transaction that has succeeded or failed; it reports
 // whether a rollback changed the holders, so that propagation must run again.
-func (r *run) resolveTx() bool {
+// With escalating, a failed transaction is left open: the escalation that
+// follows aborts it.
+func (r *run) resolveTx(escalating bool) bool {
 	rolled := false
 	for q := range r.w.Tx {
 		t := &r.w.Tx[q]
@@ -427,6 +435,7 @@ func (r *run) resolveTx() bool {
 			}
 		}
 		switch {
+		case failed && escalating:
 		case failed:
 			rolled = r.endTx(q, TxFailed) || rolled
 		case allUp:

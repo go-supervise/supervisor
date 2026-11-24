@@ -214,7 +214,11 @@ func absPlans(t testing.TB) map[string]*Plan {
 	}
 }
 
-func TestGate1AbstractGreen(t *testing.T) {
+// TestGate1PairSmoke is a smoke test, never Gate 1: the pair search is capped
+// by gate1AbsStates and gate1AbsPairs and does not close for N >= 2. Gate 1 is
+// TestGate1Unwind and the frame lemmas (gate1_unwind_test.go,
+// gate1_compose_test.go).
+func TestGate1PairSmoke(t *testing.T) {
 	for name, p := range absPlans(t) {
 		red, st, pairs, ex := gate1Abstract(p, preloaded(p), gate1AbsStates, gate1AbsPairs)
 		if red != "" {
@@ -234,7 +238,7 @@ func TestGate1AbstractClosesForOneCopy(t *testing.T) {
 	}
 }
 
-func TestGate1AbstractWitnesses(t *testing.T) {
+func TestGate1PairSmokeWitnesses(t *testing.T) {
 	for name, p := range map[string]*Plan{
 		"GoalDraft8":     fixturePlan(t, Quirks{GoalNoCut: true}),
 		"FreeAcrossCut":  fixturePlan(t, Quirks{FreeAcrossCut: true}),
@@ -248,7 +252,8 @@ func TestGate1AbstractWitnesses(t *testing.T) {
 	}
 }
 
-func TestSmokeGate1Green(t *testing.T) {
+// TestGate1PairSmokeBounded is a smoke test (3000 pair nodes), never Gate 1.
+func TestGate1PairSmokeBounded(t *testing.T) {
 	for name, p := range map[string]*Plan{
 		"fixture": fixturePlan(t, Quirks{}),
 		"mixed":   mixedPlan(t),
