@@ -11,6 +11,7 @@ import (
 
 const fixPkg = "./internal/surface/testdata/fix/"
 const fixDir = "internal/surface/testdata/fix/"
+const fixPrefix = "github.com/go-supervise/supervisor/" + fixDir + ""
 
 func source(t *testing.T, arch, name string, tags ...string) *Result {
 	t.Helper()
@@ -21,7 +22,7 @@ func source(t *testing.T, arch, name string, tags ...string) *Result {
 	// the fixtures that exercise the checks made INSIDE the one function allowed
 	// to build a SysProcAttr are that function; every other fixture is not
 	switch name {
-	case "attr", "attrglobal", "attrloaded", "forkok":
+	case "attr", "attrglobal", "attrloaded", "forkok", "twinattr", "paramattr":
 		o.AttrConstructors = []string{"github.com/go-supervise/supervisor/" + fixDir + name + "."}
 	}
 	r, err := SourceHalf(o)
@@ -54,6 +55,11 @@ func TestSourceHalfFixtures(t *testing.T) {
 		{"attr", nil, []string{
 			`source: SysProcAttr field Setpgid set at ` + fixDir + `attr/main.go:13:37`,
 			`source: SysProcAttr is not a composite literal at ` + fixDir + `attr/main.go:15:6`,
+			// and the values that arrive from a global or a parameter
+			`source: a value of SysProcAttr or Credential (or holding one) comes from *ssa.Global in ` + fixPrefix + `attr.keep at ` + fixDir + `attr/main.go:9:37, not from a literal built there`,
+			`source: a value of SysProcAttr or Credential (or holding one) comes from *ssa.Global in ` + fixPrefix + `attr.main at ` + fixDir + `attr/main.go:12:2, not from a literal built there`,
+			`source: a value of SysProcAttr or Credential (or holding one) comes from *ssa.Global in ` + fixPrefix + `attr.main at ` + fixDir + `attr/main.go:13:2, not from a literal built there`,
+			`source: a value of SysProcAttr or Credential (or holding one) comes from *ssa.Parameter in ` + fixPrefix + `attr.keep at ` + fixDir + `attr/main.go:9:37, not from a literal built there`,
 		}},
 		{"unsafe", nil, []string{
 			`source: github.com/go-supervise/supervisor/internal/surface/testdata/fix/unsafe imports "unsafe"`,
@@ -98,6 +104,15 @@ func TestSourceHalfRefusesWhatItCouldNotSee(t *testing.T) {
 		{"aliasattr", []string{`syscall.SysProcAttr is used in `, `aliasattr.main`}},
 		{"definedattr", []string{`syscall.Credential, or a type of the layout of it or of SysProcAttr, is used in `, `definedattr.main`}},
 		{"reflectset", []string{`reflectset imports reflect`}},
+		// a twin that differs by a struct tag is converted by Go all the same,
+		// inside the allowed constructor or outside it
+		{"twinattr", []string{`syscall.Credential, or a type of the layout of it or of SysProcAttr, is used in `, `twinattr.configure`}},
+		{"twinother", []string{`syscall.Credential, or a type of the layout of it or of SysProcAttr, is used in `, `twinother.configure`}},
+		// inside the constructor the value must be built there, not received
+		{"paramattr", []string{`comes from *ssa.Parameter in `, `paramattr.configure`, `not from a literal built there`}},
+		// a type that holds a SysProcAttr is a reference to it
+		{"jsonproc", []string{`syscall.SysProcAttr is used in `, `jsonproc.main`}},
+		{"gobproc", []string{`syscall.SysProcAttr is used in `, `gobproc.main`}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

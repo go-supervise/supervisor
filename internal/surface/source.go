@@ -512,25 +512,41 @@ func (a *analysis) attrTypes() attrTypes {
 // kind says whether t is, or is made of, one of the two types: through
 // aliases, pointers, slices, arrays, maps, channels and result tuples, and by
 // layout for a defined or unnamed struct.
-func (k attrTypes) kind(t types.Type) int {
+func (k attrTypes) kind(t types.Type) int { return k.walk(t, map[types.Type]bool{}) }
+
+// isAttr reports whether t is a struct of the layout of syscall.SysProcAttr
+// (struct tags ignored: a tag changes nothing about a conversion).
+func (k attrTypes) isAttr(t types.Type) bool {
+	s, ok := types.Unalias(t).Underlying().(*types.Struct)
+	return ok && k.attr != nil && types.IdenticalIgnoreTags(s, k.attr)
+}
+
+// walk is kind, with the types already entered (a recursive type ends there).
+// A type that holds one of the two, in a field, an element or a result, counts
+// as that one: syscall.ProcAttr and exec.Cmd carry a *SysProcAttr.
+func (k attrTypes) walk(t types.Type, seen map[types.Type]bool) int {
 	switch x := types.Unalias(t).(type) {
 	case *types.Pointer:
-		return k.kind(x.Elem())
+		return k.walk(x.Elem(), seen)
 	case *types.Slice:
-		return k.kind(x.Elem())
+		return k.walk(x.Elem(), seen)
 	case *types.Array:
-		return k.kind(x.Elem())
+		return k.walk(x.Elem(), seen)
 	case *types.Chan:
-		return k.kind(x.Elem())
+		return k.walk(x.Elem(), seen)
 	case *types.Map:
-		return max(k.kind(x.Key()), k.kind(x.Elem()))
+		return max(k.walk(x.Key(), seen), k.walk(x.Elem(), seen))
 	case *types.Tuple:
 		r := kindNone
 		for i := 0; i < x.Len(); i++ {
-			r = max(r, k.kind(x.At(i).Type()))
+			r = max(r, k.walk(x.At(i).Type(), seen))
 		}
 		return r
 	case *types.Named:
+		if seen[x] {
+			return kindNone
+		}
+		seen[x] = true
 		if o := x.Obj(); o.Pkg() != nil && o.Pkg().Path() == "syscall" {
 			switch o.Name() {
 			case "SysProcAttr":
@@ -539,13 +555,35 @@ func (k attrTypes) kind(t types.Type) int {
 				return kindOther
 			}
 		}
-		return k.kind(x.Underlying())
+		return k.walk(x.Underlying(), seen)
 	case *types.Struct:
-		if k.attr != nil && types.Identical(x, k.attr) || k.cred != nil && types.Identical(x, k.cred) {
+		if k.attr != nil && types.IdenticalIgnoreTags(x, k.attr) || k.cred != nil && types.IdenticalIgnoreTags(x, k.cred) {
 			return kindOther
 		}
+		r := kindNone
+		for i := 0; i < x.NumFields(); i++ {
+			r = max(r, k.walk(x.Field(i).Type(), seen))
+		}
+		return r
 	}
 	return kindNone
+}
+
+// origin says whether v is a value the allowed constructor may hold: an
+// allocation made in f, a field address of one, or the nil constant. A
+// parameter, a free variable, a global, a conversion, a load, a phi of
+// anything and a call result are not.
+func (k attrTypes) origin(v ssa.Value, f *ssa.Function) bool {
+	switch x := v.(type) {
+	case *ssa.Alloc:
+		return x.Parent() == f
+	case *ssa.FieldAddr:
+		a, ok := x.X.(*ssa.Alloc)
+		return ok && a.Parent() == f
+	case *ssa.Const:
+		return x.IsNil()
+	}
+	return false
 }
 
 // ctorAllowed reports whether f is written inside one of the functions allowed
@@ -589,7 +627,7 @@ func (a *analysis) checkAttr() {
 			if p, isPtr := t.Underlying().(*types.Pointer); isPtr {
 				t = types.Unalias(p.Elem())
 			}
-			if n, isNamed := t.(*types.Named); isNamed && k.kind(n) == kindAttr {
+			if n, isNamed := t.(*types.Named); isNamed && k.kind(n) == kindAttr && k.isAttr(n) {
 				if name := n.Underlying().(*types.Struct).Field(idx).Name(); !ok[name] {
 					a.fail("SysProcAttr field %s set at %s", name, a.pos(in.Pos()))
 				}
@@ -615,6 +653,17 @@ func (a *analysis) checkAttr() {
 				if !allowed {
 					continue
 				}
+				// every value of the types that carry the privileges must come
+				// from a literal built in this function: not from a parameter,
+				// a conversion, a load, a phi or a call
+				if v, isVal := in.(ssa.Value); isVal && k.kind(v.Type()) != kindNone && !k.origin(v, f) {
+					a.fail("a value of SysProcAttr or Credential (or holding one) comes from %T in %s at %s, not from a literal built there", v, f, a.pos(in.Pos()))
+				}
+				for _, op := range in.Operands(nil) {
+					if *op != nil && k.kind((*op).Type()) != kindNone && !k.origin(*op, f) {
+						a.fail("a value of SysProcAttr or Credential (or holding one) comes from %T in %s at %s, not from a literal built there", *op, f, a.pos(in.Pos()))
+					}
+				}
 				switch in := in.(type) {
 				case *ssa.FieldAddr:
 					field(in, in.X, in.Field)
@@ -622,7 +671,7 @@ func (a *analysis) checkAttr() {
 					field(in, in.X, in.Field)
 				case *ssa.Alloc:
 					pt, isPtr := in.Type().(*types.Pointer)
-					if !isPtr || k.kind(pt.Elem()) != kindAttr {
+					if !isPtr || !k.isAttr(pt.Elem()) || k.kind(pt.Elem()) != kindAttr {
 						continue
 					}
 					for _, r := range *in.Referrers() {

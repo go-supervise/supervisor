@@ -198,6 +198,17 @@ func TestOnlyFromForkChildNeedsCallers(t *testing.T) {
 	})
 }
 
+// recursive makes type R struct{ next *R; v extra }, extra nil for none.
+func recursive(p *types.Package, name string, extra types.Type) *types.Named {
+	n := types.NewNamed(types.NewTypeName(token.NoPos, p, name, nil), nil, nil)
+	fs := []*types.Var{types.NewField(token.NoPos, p, "next", types.NewPointer(n), false)}
+	if extra != nil {
+		fs = append(fs, types.NewField(token.NoPos, p, "v", extra, false))
+	}
+	n.SetUnderlying(types.NewStruct(fs, nil))
+	return n
+}
+
 func TestAttrKind(t *testing.T) {
 	pkg := types.NewPackage("syscall", "syscall")
 	field := func(name string) *types.Var {
@@ -237,6 +248,17 @@ func TestAttrKind(t *testing.T) {
 		{"another package", named(types.NewPackage("os", "os"), "SysProcAttr", otherStruct), kindNone},
 		{"no package", named(nil, "SysProcAttr", otherStruct), kindNone},
 		{"an empty tuple", types.NewTuple(), kindNone},
+		{"a struct holding a *SysProcAttr (ProcAttr, exec.Cmd)", named(mine, "H", types.NewStruct([]*types.Var{
+			types.NewField(token.NoPos, mine, "Sys", types.NewPointer(attr), false)}, nil)), kindAttr},
+		{"a struct holding a Credential", named(mine, "HC", types.NewStruct([]*types.Var{
+			types.NewField(token.NoPos, mine, "C", named(pkg, "Credential", credStruct), false)}, nil)), kindOther},
+		{"a struct holding a slice of a struct holding one", types.NewStruct([]*types.Var{
+			types.NewField(token.NoPos, mine, "L", types.NewSlice(named(mine, "H2", types.NewStruct([]*types.Var{
+				types.NewField(token.NoPos, mine, "S", attr, false)}, nil))), false)}, nil), kindAttr},
+		{"a struct of the layout with other tags", types.NewStruct([]*types.Var{field("Chroot"), field("Setsid")}, []string{`a:"b"`, ""}), kindOther},
+		{"a struct holding an int", named(mine, "HI", types.NewStruct([]*types.Var{field("N")}, nil)), kindNone},
+		{"a recursive type holding nothing", recursive(mine, "R1", nil), kindNone},
+		{"a recursive type holding one", recursive(mine, "R2", attr), kindAttr},
 	} {
 		noPanic(t, c.name, func() {
 			if got := k.kind(c.t); got != c.want {
