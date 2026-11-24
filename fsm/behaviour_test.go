@@ -169,6 +169,8 @@ func TestDelegatedOverflowIsLocal(t *testing.T) {
 	}
 }
 
+// Regression: REVIEW-3 D4 (Retry clears R_A and charges once) and REVIEW-6 N4
+// (the Retry payment, F9).
 func TestRetryPaysOnce(t *testing.T) {
 	failedGrant := func(t *testing.T, mod func(*Plan)) *H {
 		p := one(t, Always, func(p *Plan) { p.Svc[0].Grant = true; p.BudgetP = 3; mod(p) })
@@ -194,6 +196,7 @@ func TestRetryPaysOnce(t *testing.T) {
 	}
 }
 
+// Regression: REVIEW-5 F9 and the owner-Retry finding G1 (section 3.3).
 func TestRetryOfOwnerServicePaysInstAndEscalates(t *testing.T) {
 	p := one(t, Always, func(p *Plan) { p.MaxInst = 1 })
 	h := newH(t, p)
@@ -213,6 +216,7 @@ func TestRetryOfOwnerServicePaysInstAndEscalates(t *testing.T) {
 	}
 }
 
+// Regression: REVIEW-3 D2 (a Retry with the goal down pays nothing).
 func TestRetryWithGoalDownPaysNothing(t *testing.T) {
 	p := one(t, Always, nil)
 	h := newH(t, p)
@@ -235,7 +239,8 @@ func TestAPIRefusalsInOrder(t *testing.T) {
 	h.fail(Input{Kind: InRetry, By: Owner, Svc: -1}, ErrInput)
 	h.fail(Input{Kind: InRestart, By: Owner, Svc: 2}, ErrInput)
 	h.fail(Input{Kind: 0}, ErrInput)
-	h.fail(Input{Kind: InDeadline, By: 2}, ErrInput)
+	h.fail(Input{Kind: InDeadline, Slot: 3}, ErrInput)
+	h.fail(Input{Kind: InDeadline, Slot: -1}, ErrInput)
 	h.fail(Input{Kind: InStart, By: Delegate, Targets: 1}, ErrGrant)
 	h.fail(Input{Kind: InStop, By: Delegate, Targets: 3}, ErrGrant)
 	h.fail(Input{Kind: InRetry, By: Delegate, Svc: 0}, ErrGrant)
@@ -270,6 +275,8 @@ func TestAPIRefusalsInOrder(t *testing.T) {
 	h.fail(Input{Kind: InRetry, Now: now, By: 2, Svc: 9}, ErrQuiescing)
 }
 
+// Regression: REVIEW-4 E1 and E2 (holders and the cut; p cannot remove the
+// holders of other principals outside G).
 func TestStopClearsOnlyTheCallersHolder(t *testing.T) {
 	p := newPlan(t, Plan{Svc: []SvcPlan{{Restart: Always, Grant: true}}})
 	h := newH(t, p)
@@ -348,9 +355,9 @@ func TestTransactionSuccessFailureAbort(t *testing.T) {
 	t.Run("deadline", func(t *testing.T) {
 		h := newH(t, plan())
 		h.do(Input{Kind: InStart, By: Owner, Targets: 0b10, Deadline: 10})
-		h.stale(Input{Kind: InDeadline, Now: 9, By: Owner})
-		h.stale(Input{Kind: InDeadline, Now: 9, By: Delegate})
-		h.do(Input{Kind: InDeadline, Now: 10, By: Owner})
+		h.stale(Input{Kind: InDeadline, Now: 9, Slot: int(Owner)})
+		h.stale(Input{Kind: InDeadline, Now: 9, Slot: int(Delegate)})
+		h.do(Input{Kind: InDeadline, Now: 10, Slot: int(Owner)})
 		if tx := h.w.Tx[Owner]; tx.Active || tx.Out != TxFailed || h.w.Svc[1].H[Owner] {
 			t.Fatalf("tx %+v", tx)
 		}
@@ -410,6 +417,8 @@ func TestExitedPredicate(t *testing.T) {
 	}
 }
 
+// Regression: REVIEW-3 D3 (a stale WTO leaves the state unchanged) and D7 (a
+// late SEp leaves no tree).
 func TestStaleFilters(t *testing.T) {
 	p := one(t, Always, nil)
 	h := newH(t, p)
@@ -463,6 +472,7 @@ func TestEventInputErrors(t *testing.T) {
 	h.fail(Input{Kind: InEvent, Svc: 0, Event: WTO}, ErrUnreachable) // Inactive x WTO
 }
 
+// Regression: REVIEW-4 E8 (StopWait x X1 records perm only from the pipe).
 func TestPermOnlyWhereThePipeCanHoldIt(t *testing.T) {
 	p := one(t, Never, nil)
 	h := newH(t, p)
@@ -488,6 +498,8 @@ func TestPermOnlyWhereThePipeCanHoldIt(t *testing.T) {
 	}
 }
 
+// Regression: REVIEW-3 D1 (a signalled oneshot is not Done) and REVIEW-5 D1
+// (a StartTO oneshot restart is charged).
 func TestSettleRulesInOrder(t *testing.T) {
 	type tc struct {
 		name   string

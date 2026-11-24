@@ -1,6 +1,7 @@
 package fsm
 
 import (
+	"fmt"
 	"sort"
 	"testing"
 )
@@ -163,6 +164,14 @@ func checkInvariants(t testing.TB, p *Plan, w *World) {
 // most twice, self-moves included.
 func perServiceBound(t testing.TB, r *Result) {
 	t.Helper()
+	if msg := perServiceViolation(r); msg != "" {
+		t.Fatal(msg)
+	}
+}
+
+// perServiceViolation is "" when no service moved more than twice with fixed
+// inputs, and says which did otherwise.
+func perServiceViolation(r *Result) string {
 	type run struct {
 		sig   uint8
 		count int
@@ -177,9 +186,10 @@ func perServiceBound(t testing.TB, r *Result) {
 		}
 		last[m.Svc] = l
 		if l.count > 2 {
-			t.Fatalf("service %d moved %d times with fixed inputs: %+v", m.Svc, l.count, r.Moves)
+			return fmt.Sprintf("service %d moved %d times with fixed inputs: %+v", m.Svc, l.count, r.Moves)
 		}
 	}
+	return ""
 }
 
 func sortedCells(m map[cellID][]Tok) []cellID {

@@ -114,7 +114,7 @@ func NewPlan(p Plan) (*Plan, error) {
 	return &p, nil
 }
 
-// targets calls f for every edge a -> b, with its kind.
+// edges calls f for every edge a -> b (a depends on b), with its kind.
 func (p *Plan) edges(f func(a, b int, k edgeKind)) {
 	for a, s := range p.Svc {
 		for _, b := range s.Req {
@@ -255,7 +255,7 @@ type World struct {
 	Now    int64
 	RInst  []int64
 	RP     []int64
-	Tx     [2]Tx
+	Tx     [3]Tx // by slot: owner on O, the delegate, owner on a grant
 }
 
 // NewWorld is the initial world: every service Inactive, no holder.

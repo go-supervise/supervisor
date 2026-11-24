@@ -144,8 +144,8 @@ func TestStepDeterministic(t *testing.T) {
 	p := mixedPlan(t)
 	var path []Input
 	h := newH(t, p)
-	h.start(Owner, 0b111)
-	path = append(path, Input{Kind: InStart, By: Owner, Targets: 0b111, Deadline: 10})
+	h.start(Owner, 0b011)
+	path = append(path, Input{Kind: InStart, By: Owner, Targets: 0b011, Deadline: 10})
 	for i := 0; i < 8 && h.w.Mode == Running; i++ {
 		for s := range h.w.Svc {
 			if h.w.Svc[s].S == Starting {

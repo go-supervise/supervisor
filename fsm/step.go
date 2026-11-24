@@ -14,7 +14,7 @@ const (
 	InStop                       // Targets, By
 	InTerm                       // SIGTERM: Quiescing(0)
 	InTick                       // time passes
-	InDeadline                   // By: the request deadline of By's transaction
+	InDeadline                   // Slot: the request deadline of that transaction slot
 )
 
 // Input is one step's input. Now is the time of the step and may not
@@ -28,6 +28,7 @@ type Input struct {
 	Gen        uint32
 	Perm       bool // the status pipe holds perm (X1 only)
 	By         Principal
+	Slot       int // InDeadline: Owner, Delegate or OwnerInGrant
 	Targets    uint32
 	Deadline   int64
 	NoRollback bool
@@ -97,14 +98,17 @@ func (p *Plan) step(w *World, in Input, order []int) (*World, *Result, error) {
 	if err := r.input(in); err != nil {
 		return nil, nil, err
 	}
+	// Each pass ends at least one transaction, and there are two principals,
+	// so a third pass finds nothing to resolve.
 	for {
 		if err := r.converge(order); err != nil {
 			return nil, nil, err
 		}
 		if !r.resolveTx() {
-			return r.w, r.res, nil
+			break
 		}
 	}
+	return r.w, r.res, nil
 }
 
 func (r *run) input(in Input) error {
@@ -244,7 +248,13 @@ func (r *run) start(in Input) error {
 	if err := r.writable(in.By, in.Targets); err != nil {
 		return err
 	}
-	if r.w.Tx[in.By].Active {
+	// One partition per request (section 2.3, draft 10): the targets of a
+	// transaction lie in O or in one grant, never across the cut.
+	if g := r.grantMask(); in.Targets&g != 0 && in.Targets&^g != 0 {
+		return ErrInput
+	}
+	q := r.slot(in.By, in.Targets)
+	if r.w.Tx[q].Active {
 		return ErrTxBusy
 	}
 	if in.By == Delegate {
@@ -261,8 +271,30 @@ func (r *run) start(in Input) error {
 		}
 	}
 	after := r.p.Goals(r.w)
-	r.w.Tx[in.By] = Tx{Active: true, Members: members, T: after &^ before, Deadline: in.Deadline, NoRollback: in.NoRollback}
+	r.w.Tx[q] = Tx{Active: true, Members: members, T: after &^ before, Deadline: in.Deadline, NoRollback: in.NoRollback}
 	return nil
+}
+
+// OwnerInGrant is the slot of the owner's transaction whose targets lie in a
+// grant. A transaction is pending per holder and partition (section 2.4,
+// "at most one open transaction per holder"): were the owner's transaction on
+// a grant to block the owner's next start on O, p's choices would decide
+// whether an owner operation on O is enabled, and Gate 1 is red on exactly
+// that.
+const OwnerInGrant = 2
+
+func (r *run) slot(by Principal, targets uint32) int {
+	if by == Owner && targets&r.grantMask() != 0 {
+		return OwnerInGrant
+	}
+	return int(by)
+}
+
+func slotPrincipal(q int) Principal {
+	if q == int(Delegate) {
+		return Delegate
+	}
+	return Owner
 }
 
 func (r *run) stop(in Input) error {
@@ -283,19 +315,20 @@ func (r *run) stop(in Input) error {
 }
 
 func (r *run) deadline(in Input) error {
-	if in.By > Delegate {
+	if in.Slot < 0 || in.Slot >= len(r.w.Tx) {
 		return ErrInput
 	}
-	if t := &r.w.Tx[in.By]; !t.Active || r.w.Now < t.Deadline {
+	if t := &r.w.Tx[in.Slot]; !t.Active || r.w.Now < t.Deadline {
 		r.res.Stale = true
 		return nil
 	}
-	r.endTx(in.By, TxFailed)
+	r.endTx(in.Slot, TxFailed)
 	return nil
 }
 
-// endTx ends q's transaction; it reports whether a rollback removed holders.
-func (r *run) endTx(q Principal, out TxOut) bool {
+// endTx ends the transaction of slot q; it reports whether a rollback removed
+// holders.
+func (r *run) endTx(q int, out TxOut) bool {
 	t := &r.w.Tx[q]
 	t.Active, t.Out = false, out
 	if out != TxFailed || t.NoRollback {
@@ -303,7 +336,7 @@ func (r *run) endTx(q Principal, out TxOut) bool {
 	}
 	for i := range r.w.Svc {
 		if t.Members&(1<<i) != 0 {
-			r.w.Svc[i].H[q] = false
+			r.w.Svc[i].H[slotPrincipal(q)] = false
 		}
 	}
 	return t.Members != 0
@@ -328,9 +361,9 @@ func (r *run) resolveTx() bool {
 		}
 		switch {
 		case failed:
-			rolled = r.endTx(Principal(q), TxFailed) || rolled
+			rolled = r.endTx(q, TxFailed) || rolled
 		case allUp:
-			r.endTx(Principal(q), TxOK)
+			r.endTx(q, TxOK)
 		}
 	}
 	return rolled
@@ -583,8 +616,8 @@ func (p *Plan) moveCap() int { return 32 * len(p.Svc) * len(p.Svc) }
 // converge applies guards until none is enabled (level-triggered propagation,
 // section 3.5), sweeping the services in the given order.
 func (r *run) converge(order []int) error {
-	for {
-		moved := false
+	for moved := true; moved; {
+		moved = false
 		for _, i := range order {
 			// Stabilise one service before the next, as the termination
 			// argument of section 3.5 does (sinks first).
@@ -595,10 +628,8 @@ func (r *run) converge(order []int) error {
 				}
 			}
 		}
-		if !moved {
-			return nil
-		}
 	}
+	return nil
 }
 
 // signature is the inputs of service i's guards, one bit each.

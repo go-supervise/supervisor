@@ -66,7 +66,7 @@ func decode(p *Plan, w *World, t Tok) Input {
 	case kTick:
 		in.Kind, in.Now = InTick, w.Now+1+int64(t.C&1)
 	case kDeadline:
-		in.Kind, in.By = InDeadline, Principal(t.B&1)
+		in.Kind, in.Slot = InDeadline, int(t.B)%3
 	}
 	return in
 }
@@ -106,7 +106,7 @@ func allTokens(p *Plan) []Tok {
 			toks = append(toks, Tok{kRetry, i, by, 0}, Tok{kRestart, i, by, 0}, Tok{kStart, 1 << i, by, 0}, Tok{kStop, 1 << i, by, 0})
 		}
 	}
-	toks = append(toks, Tok{kTerm, 0, 0, 0}, Tok{kTick, 0, 0, 0}, Tok{kDeadline, 0, 0, 0}, Tok{kDeadline, 0, 1, 0})
+	toks = append(toks, Tok{kTerm, 0, 0, 0}, Tok{kTick, 0, 0, 0}, Tok{kDeadline, 0, 0, 0}, Tok{kDeadline, 0, 1, 0}, Tok{kDeadline, 0, 2, 0})
 	return toks
 }
 
