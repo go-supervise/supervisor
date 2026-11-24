@@ -122,17 +122,17 @@ func TestFilterTgkillByArgument(t *testing.T) {
 	}
 }
 
-func TestFilterRefusesOpenatAtFdcwdOnAmd64Only(t *testing.T) {
-	for arch, refuse := range map[string]bool{"amd64": true, "arm64": false} {
+// The runtime's own openat(AT_FDCWD) is the recorder's to judge by path, on
+// both architectures: the filter answers only for the call number.
+func TestFilterLeavesOpenatAtFdcwdToTheRecorder(t *testing.T) {
+	for _, arch := range []string{"amd64", "arm64"} {
 		aud, _ := AuditArch(arch)
 		p, _ := BuildFilter(arch, 1)
 		nr := uint32(SysNum(arch)["openat"])
-		got := run(t, p, seccompData{nr: nr, arch: aud, arg0: atFdcwd32})
-		if refuse && got != RetKillProcess || !refuse && got != RetAllow {
-			t.Errorf("%s: openat(AT_FDCWD) answered %#x", arch, got)
-		}
-		if got := run(t, p, seccompData{nr: nr, arch: aud, arg0: 5}); got != RetAllow {
-			t.Errorf("%s: a dirfd-relative openat answered %#x", arch, got)
+		for _, a := range []uint32{atFdcwd32, 5} {
+			if got := run(t, p, seccompData{nr: nr, arch: aud, arg0: a}); got != RetAllow {
+				t.Errorf("%s: openat(%#x) answered %#x", arch, a, got)
+			}
 		}
 	}
 }

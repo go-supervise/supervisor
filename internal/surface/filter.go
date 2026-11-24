@@ -56,10 +56,10 @@ func jumpOffset(from, to int) (uint8, error) {
 
 // BuildFilter is the filter of the dynamic half (7.1.2 item 2) for arch: every
 // call of Allowed(arch) is allowed, tgkill only when its first argument is
-// tgid, openat with AT_FDCWD as its first argument is refused on amd64 (on
-// arm64 Go's own runtime issues one, which the recorder attributes by path
-// instead), and everything else, a foreign architecture included, answers
-// SECCOMP_RET_KILL_PROCESS.
+// tgid, and everything else, a foreign architecture included, answers
+// SECCOMP_RET_KILL_PROCESS. An openat with AT_FDCWD is not the filter's to
+// refuse: Go's own runtime issues one on both architectures (the huge-page
+// size), and the recorder attributes each by path instead.
 func BuildFilter(arch string, tgid uint32) ([]Insn, error) {
 	aud, ok := AuditArch(arch)
 	if !ok {
@@ -68,7 +68,7 @@ func BuildFilter(arch string, tgid uint32) ([]Insn, error) {
 	tab := SysNum(arch)
 	never := Set(Never)
 	var plain []int64
-	var tgkill, openat int64 = -1, -1
+	var tgkill int64 = -1
 	for name := range Allowed(arch) {
 		nr, ok := tab[name]
 		if !ok {
@@ -82,8 +82,6 @@ func BuildFilter(arch string, tgid uint32) ([]Insn, error) {
 			tgkill = nr
 		case never[name]:
 			return nil, fmt.Errorf("surface: %q is never allowed", name)
-		case name == "openat" && arch == "amd64":
-			openat = nr
 		default:
 			plain = append(plain, nr)
 		}
@@ -91,8 +89,8 @@ func BuildFilter(arch string, tgid uint32) ([]Insn, error) {
 	sort.Slice(plain, func(i, j int) bool { return plain[i] < plain[j] })
 
 	// Layout: arch check (3), load nr, one jeq per plain call, the optional
-	// tgkill and openat jeqs, then KILL, ALLOW and the two argument blocks
-	// (tgkill: 4 instructions, openat: 4).
+	// tgkill jeq, then KILL, ALLOW and the argument block (tgkill: 4
+	// instructions).
 	var p []Insn
 	p = append(p,
 		Insn{Code: bpfLdAbsW, K: offArch},
@@ -102,9 +100,6 @@ func BuildFilter(arch string, tgid uint32) ([]Insn, error) {
 	)
 	nJeq := len(plain)
 	if tgkill >= 0 {
-		nJeq++
-	}
-	if openat >= 0 {
 		nJeq++
 	}
 	// After the jeqs: [kill] [allow] [tgkill: ld, jeq, kill, allow ...].
@@ -118,33 +113,17 @@ func BuildFilter(arch string, tgid uint32) ([]Insn, error) {
 		}
 		p = append(p, Insn{Code: bpfJeqK, Jt: jt, K: uint32(nr)})
 	}
-	tgAt := blockAt
-	opAt := blockAt
+	// The argument jeq sits right before KILL: its target is at most two
+	// instructions away, so its offset always fits (a test pins the decisions
+	// it leads to).
 	if tgkill >= 0 {
-		opAt += 4
-	}
-	// The two argument jeqs sit right before KILL: their targets are at most
-	// four instructions away, so their offsets always fit (a test pins the
-	// decisions they lead to).
-	if tgkill >= 0 {
-		p = append(p, Insn{Code: bpfJeqK, Jt: uint8(tgAt - len(p) - 1), K: uint32(tgkill)})
-	}
-	if openat >= 0 {
-		p = append(p, Insn{Code: bpfJeqK, Jt: uint8(opAt - len(p) - 1), K: uint32(openat)})
+		p = append(p, Insn{Code: bpfJeqK, Jt: uint8(blockAt - len(p) - 1), K: uint32(tgkill)})
 	}
 	p = append(p, Insn{Code: bpfRetK, K: RetKillProcess}, Insn{Code: bpfRetK, K: RetAllow})
 	if tgkill >= 0 { // ld arg0; jeq tgid -> allow, else kill (BPF jumps only forward)
 		p = append(p,
 			Insn{Code: bpfLdAbsW, K: offArg0},
 			Insn{Code: bpfJeqK, Jf: 1, K: tgid},
-			Insn{Code: bpfRetK, K: RetAllow},
-			Insn{Code: bpfRetK, K: RetKillProcess},
-		)
-	}
-	if openat >= 0 { // ld arg0; jeq AT_FDCWD -> kill (skips the allow)
-		p = append(p,
-			Insn{Code: bpfLdAbsW, K: offArg0},
-			Insn{Code: bpfJeqK, Jt: 1, K: atFdcwd32},
 			Insn{Code: bpfRetK, K: RetAllow},
 			Insn{Code: bpfRetK, K: RetKillProcess},
 		)

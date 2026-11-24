@@ -84,7 +84,11 @@ func surfaceTools(t *testing.T, dir string, tags ...string) RunOptions {
 		flags = []string{"-tags=" + strings.Join(tags, ",")}
 	}
 	buildHost(t, o.Monitor, "./cmd/svd-monitor", flags...)
-	buildHost(t, o.Stub, "./internal/surface/stubhelper")
+	// Under the recorder every system call stops, so the stub's start-up runs
+	// long enough for Go's sysmon to preempt it with a tgkill of its own tgid,
+	// which the filter (built for M_p's tgid) answers with SIGSYS. The stub
+	// is not what is judged: it does not take that signal.
+	buildHost(t, o.Stub, "./internal/surface/stubhelper", "-ldflags=-X=runtime.godebugDefault=asyncpreemptoff=1")
 	return o
 }
 
