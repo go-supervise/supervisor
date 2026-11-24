@@ -161,7 +161,7 @@ func (r *run) event(in Input) error {
 		return ErrInput
 	}
 	sv := &r.w.Svc[in.Svc]
-	if !accepts(sv, in) {
+	if !accepts(sv, in) && !(r.p.Quirks.StaleGAsCurrent && r.p.Svc[in.Svc].Grant) {
 		r.res.Stale = true
 		return nil
 	}
@@ -404,7 +404,7 @@ func (r *run) endTx(q int, out TxOut) bool {
 	}
 	by := Principal(q / len(r.p.Svc))
 	for i := range r.w.Svc {
-		if t.Members&(1<<i) != 0 {
+		if t.Members&(1<<i) != 0 || r.p.Quirks.RollbackAll {
 			r.w.Svc[i].H[by] = false
 		}
 	}

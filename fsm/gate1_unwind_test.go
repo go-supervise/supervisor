@@ -88,6 +88,20 @@ type unwindSig struct {
 // returns the red case, the number of states, the number of cases and whether
 // the frontier was emptied (closed) within limit states.
 func unwind(p *Plan, init *World, limit int) (red string, states, cases int, closed bool) {
+	return unwindOpts(p, init, limit, true)
+}
+
+// isStaleTok says a token is an event one epoch and one generation behind.
+func isStaleTok(tok Tok) bool {
+	return tok.K == kEvent && (tok.C>>1)&3 == 2 && Event(int(tok.B)%NumEvents) != Ry && Event(int(tok.B)%NumEvents) != Rs
+}
+
+// unwindOpts is unwind with the stale-filter clause SF switchable, so that a
+// witness can show which clause sees a defect. SF (the generation-match
+// clause, draft 17 gap 2): a stale event, of any service, is dropped before it
+// reads the world: kind stale, no effect, world unchanged. LR cannot say so for
+// a service of G, since a stale G event processed as current moves no pi.
+func unwindOpts(p *Plan, init *World, limit int, sf bool) (red string, states, cases int, closed bool) {
 	toks := abstractTokens(p)
 	classes := make([]byte, len(toks))
 	for i, tok := range toks {
@@ -162,6 +176,9 @@ func unwind(p *Plan, init *World, limit int) (red string, states, cases int, clo
 				s.eff = effO(p, r)
 				intern(nw)
 			}
+			if sf && isStaleTok(tok) && (s.kind != 2 || (r != nil && len(r.Effects) != 0)) {
+				return fmt.Sprintf("SF: the stale event %+v (class %c) was not dropped (kind %d) from %s", tok, classes[ti], s.kind, piKey(p, w)), len(worlds), cases, false
+			}
 			desc := fmt.Sprintf("%+v (class %c) from %s", tok, classes[ti], piKey(p, w))
 			if tok.K == ageTok {
 				desc = fmt.Sprintf("age(%d) (class %c) from %s", tok.A, classes[ti], piKey(p, w))
@@ -228,5 +245,30 @@ func TestGate1UnwindWitnesses(t *testing.T) {
 		if red == "" {
 			t.Errorf("%s: the unwinding conditions do not see the defect", name)
 		}
+	}
+}
+
+// TestGate1StaleFilterWitness: a delivered stale event of a service in G
+// processed as current (Quirks.StaleGAsCurrent) moves no component of pi, so
+// the unwinding conditions without the stale-filter clause SF are blind to it
+// (LR sees pi unchanged); with SF it is red. The honest model is green under
+// both.
+func TestGate1StaleFilterWitness(t *testing.T) {
+	spec := func(q Quirks) *Plan {
+		return newPlan(t, Plan{Quirks: q, MaxInst: 1, BudgetP: 1, Svc: []SvcPlan{{Restart: OnFailure, MaxA: 1, Grant: true}}})
+	}
+	good, bad := spec(Quirks{}), spec(Quirks{StaleGAsCurrent: true})
+	if red, _, _, closed := unwind(good, good.NewWorld(), 100000); red != "" || !closed {
+		t.Fatalf("the honest model is red or open: %q closed=%t", red, closed)
+	}
+	redLR, st, cs, _ := unwindOpts(bad, bad.NewWorld(), 100000, false)
+	t.Logf("without SF: red=%t (%d states, %d cases) %.100s", redLR != "", st, cs, redLR)
+	if redLR != "" {
+		t.Errorf("the stale-as-current mutant is red without SF (%s): the test no longer shows that LR is blind to it", redLR)
+	}
+	redSF, st, cs, _ := unwindOpts(bad, bad.NewWorld(), 100000, true)
+	t.Logf("with SF: red=%t (%d states, %d cases) %.140s", redSF != "", st, cs, redSF)
+	if !strings.HasPrefix(redSF, "SF:") {
+		t.Errorf("the stale-as-current mutant is not red under SF: %q", redSF)
 	}
 }

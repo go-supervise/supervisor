@@ -35,6 +35,13 @@ type Quirks struct {
 	NoWantClosure  bool // grants are not closed under want edges (ErrGrantNotClosed dropped)
 	RetryPayCaller bool // draft 8's Retry cell: pay(caller)
 	FreeAcrossCut  bool // G_free reads dependents across a cut edge
+	// StaleGAsCurrent delivers a stale (earlier epoch or generation) event of a
+	// service in a grant as if it were current. It changes no component of pi, so
+	// local respect cannot see it; the stale-filter clause of Gate 1 does.
+	StaleGAsCurrent bool
+	// RollbackAll makes a failed transaction's rollback clear its holder on
+	// every service, not only on the members: a G rollback then writes pi.
+	RollbackAll bool
 }
 
 // Plan is the static description of an instance: services, budgets, tables.

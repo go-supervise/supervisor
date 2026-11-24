@@ -115,39 +115,7 @@ func TestGate1FrameClosure(t *testing.T) {
 	}
 }
 
-// TestGate1FrameF3Goals: goal(C) for C in O is a function of the holders on O.
-// Exhaustive: every labelled DAG of 3 services, every closed grant assignment,
-// every assignment of the 2 x 3 holder bits.
-func TestGate1FrameF3Goals(t *testing.T) {
-	plans, cases := 0, 0
-	dagPlans(3, func(p *Plan, _ Plan) {
-		plans++
-		o := omask(p)
-		n := len(p.Svc)
-		seen := map[uint32]uint32{}
-		for h := uint32(0); h < 1<<(2*n); h++ {
-			w := p.NewWorld()
-			var onO uint32
-			for i := 0; i < n; i++ {
-				w.Svc[i].H[Owner] = h&(1<<(2*i)) != 0
-				w.Svc[i].H[Delegate] = h&(1<<(2*i+1)) != 0
-				if o&(1<<i) != 0 {
-					onO |= (h >> (2 * i) & 3) << (2 * i)
-				}
-			}
-			cases++
-			g := p.Goals(w) & o
-			if prev, ok := seen[onO]; ok && prev != g {
-				t.Fatalf("goals on O depend on a holder in G: plan %+v, holders %b", p.Svc, h)
-			}
-			seen[onO] = g
-		}
-	})
-	t.Logf("F3: %d plans, %d (plan, holder assignment) cases", plans, cases)
-	if plans == 0 {
-		t.Fatal("no plan was checked")
-	}
-}
+// TestGate1FrameF3Goals (F3) is in gate1_lemmas2_test.go.
 
 // gPart is gamma of a world.
 type gPart struct {

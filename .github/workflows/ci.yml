@@ -26,7 +26,9 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: test -z "$(gofmt -l .)"
       - run: go vet ./...
-      - run: go test -count=1 ./...
+      # Gate 1 (Theorems U and C) enumerates whole neighbourhoods: minutes, not
+      # seconds, and never skipped. The default 10 min package timeout is too short.
+      - run: go test -count=1 -timeout 40m ./...
 
   govulncheck:
     runs-on: ubuntu-latest
