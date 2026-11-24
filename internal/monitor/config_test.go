@@ -38,9 +38,16 @@ func TestConfigRoundTrip(t *testing.T) {
 func TestConfigRefusesEveryTruncation(t *testing.T) {
 	b := sample().Marshal()
 	for i := 0; i < len(b); i++ {
-		if _, err := ParseConfig(b[:i]); !errors.Is(err, ErrConfig) {
-			t.Fatalf("prefix of %d bytes: %v", i, err)
-		}
+		func() {
+			defer func() { // ParseConfig is total: a panic is a failed assertion
+				if p := recover(); p != nil {
+					t.Fatalf("prefix of %d bytes panicked: %v", i, p)
+				}
+			}()
+			if _, err := ParseConfig(b[:i]); !errors.Is(err, ErrConfig) {
+				t.Fatalf("prefix of %d bytes: %v", i, err)
+			}
+		}()
 	}
 }
 
