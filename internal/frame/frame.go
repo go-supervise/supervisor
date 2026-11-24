@@ -109,12 +109,16 @@ type reader struct {
 	err error
 }
 
-func (r *reader) take(n int) []byte {
-	if r.err != nil {
-		return nil
+// fail records the first error only: a later, consequent one never replaces it.
+func (r *reader) fail(e error) {
+	if r.err == nil {
+		r.err = e
 	}
-	if n < 0 || n > len(r.b) {
-		r.err = ErrShort
+}
+
+func (r *reader) take(n int) []byte {
+	if n > len(r.b) {
+		r.fail(ErrShort)
 		return nil
 	}
 	s := r.b[:n]
@@ -139,10 +143,8 @@ func (r *reader) u64() uint64 {
 // count reads a length and refuses one above max before anything is allocated.
 func (r *reader) count(max int) int {
 	n := r.u32()
-	if r.err == nil && n > uint32(max) {
-		r.err = ErrBound
-	}
-	if r.err != nil {
+	if n > uint32(max) {
+		r.fail(ErrBound)
 		return 0
 	}
 	return int(n)
@@ -165,17 +167,10 @@ func Decode(b []byte) (*Frame, error) {
 		return nil, ErrBound
 	}
 	r := &reader{b: b}
-	if r.u32() != Magic {
-		if r.err != nil {
-			return nil, r.err
-		}
+	if m := r.u32(); r.err == nil && m != Magic {
 		return nil, ErrMagic
 	}
-	d := r.take(len(Digest))
-	if r.err != nil {
-		return nil, r.err
-	}
-	if string(d) != string(Digest[:]) {
+	if d := r.take(len(Digest)); r.err == nil && string(d) != string(Digest[:]) {
 		return nil, ErrStageMismatch
 	}
 	f := &Frame{UID: r.u32(), GID: r.u32()}

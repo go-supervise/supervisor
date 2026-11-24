@@ -59,11 +59,31 @@ func TestRefusals(t *testing.T) {
 			return b
 		}, ErrBound},
 	}
+	cases["magic only"] = struct {
+		mut  func([]byte) []byte
+		want error
+	}{func(b []byte) []byte { return b[:4] }, ErrShort}
+	cases["half digest"] = struct {
+		mut  func([]byte) []byte
+		want error
+	}{func(b []byte) []byte { return b[:20] }, ErrShort}
+	cases["exactly max, zeros"] = struct {
+		mut  func([]byte) []byte
+		want error
+	}{func(b []byte) []byte { return make([]byte, MaxFrame) }, ErrMagic}
 	for name, c := range cases {
-		_, err := Decode(c.mut(bytes.Clone(good)))
-		if !errors.Is(err, c.want) {
-			t.Errorf("%s: got %v, want %v", name, err, c.want)
-		}
+		// A panic is an assertion failure here, not a luckily red suite.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: panic: %v", name, r)
+				}
+			}()
+			_, err := Decode(c.mut(bytes.Clone(good)))
+			if !errors.Is(err, c.want) {
+				t.Errorf("%s: got %v, want %v", name, err, c.want)
+			}
+		}()
 	}
 }
 
@@ -79,6 +99,33 @@ func TestEncodeBounds(t *testing.T) {
 		if _, err := f.Encode(); !errors.Is(err, ErrBound) {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// The total bound: 256 strings of MaxString each fit their own bounds but not
+// the frame's; and a frame of exactly MaxFrame bytes is accepted.
+func TestEncodeTotalBound(t *testing.T) {
+	big := string(make([]byte, MaxString))
+	f := &Frame{}
+	for i := 0; i < MaxStrings; i++ {
+		f.Argv = append(f.Argv, big)
+	}
+	if _, err := f.Encode(); !errors.Is(err, ErrBound) {
+		t.Fatalf("over the total: %v", err)
+	}
+	// Shrink the last string until the frame is exactly MaxFrame bytes.
+	empty, _ := (&Frame{Argv: f.Argv[:MaxStrings-1]}).Encode()
+	last := MaxFrame - len(empty) - 4
+	if last < 0 || last > MaxString {
+		t.Fatalf("arithmetic: %d", last)
+	}
+	f.Argv[MaxStrings-1] = string(make([]byte, last))
+	b, err := f.Encode()
+	if err != nil || len(b) != MaxFrame {
+		t.Fatalf("exactly max: %d, %v", len(b), err)
+	}
+	if _, err := Decode(b); err != nil {
+		t.Fatalf("decode of a frame of exactly max: %v", err)
 	}
 }
 

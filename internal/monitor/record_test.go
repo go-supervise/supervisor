@@ -65,10 +65,17 @@ func TestDecodeTable(t *testing.T) {
 		{"kill stale epoch", rec(KindKillTree, 0, 2, 0, 5, 7), 64, false, Refuse, BadEpoch},
 	}
 	for _, c := range cases {
-		_, out, why := Decode(c.buf, c.n, c.trunc, state())
-		if out != c.out || why != c.why {
-			t.Errorf("%s: got (%d,%d) want (%d,%d)", c.name, out, why, c.out, c.why)
-		}
+		func() {
+			defer func() { // a panic is an assertion failure, not a lucky red
+				if r := recover(); r != nil {
+					t.Errorf("%s: panic: %v", c.name, r)
+				}
+			}()
+			_, out, why := Decode(c.buf, c.n, c.trunc, state())
+			if out != c.out || why != c.why {
+				t.Errorf("%s: got (%d,%d) want (%d,%d)", c.name, out, why, c.out, c.why)
+			}
+		}()
 	}
 }
 
