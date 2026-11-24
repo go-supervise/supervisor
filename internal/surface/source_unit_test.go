@@ -47,6 +47,16 @@ func TestSourceHalfRefusesAnotherToolchain(t *testing.T) {
 	}
 }
 
+func TestSourceHalfReportsADriverFailure(t *testing.T) {
+	was := goVersionOf
+	defer func() { goVersionOf = was }()
+	goVersionOf = func(string, []string) (string, error) { return "go1.27.0", nil }
+	_, err := SourceHalf(Options{Dir: filepath.Join(t.TempDir(), "absent"), Entry: fixPkg + "ok", GOARCH: "amd64"})
+	if err == nil || strings.HasPrefix(err.Error(), "surface:") {
+		t.Errorf("a directory the package driver cannot enter: %v", err)
+	}
+}
+
 func TestSourceHalfRefusesWhatItCannotLoad(t *testing.T) {
 	if testing.Short() {
 		t.Skip("loads packages (the gate1 job runs it)")
