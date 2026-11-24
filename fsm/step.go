@@ -297,9 +297,7 @@ func (r *run) start(in Input) error {
 			t.NoRollback = true
 		}
 	}
-	if fresh == 0 {
-		return nil
-	}
+	// nothing is fresh for a repeated start: the loop below does nothing
 	for i := range r.w.Svc {
 		if fresh&(1<<i) == 0 {
 			continue
