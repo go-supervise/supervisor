@@ -38,7 +38,13 @@ var (
 
 // lemmaPool is the pool of local states, in a fixed order, with epoch and
 // generation zero and R holding |R_A| entries at time 0.
+//
+// Every test that needs it is a Gate 1 enumeration of minutes: with -short it is
+// left to the mandatory `gate1` CI job, which runs the package without -short.
 func lemmaPool(t testing.TB) []SvcState {
+	if testing.Short() {
+		t.Skip("Gate 1 enumeration: runs in the gate1 CI job, without -short")
+	}
 	poolOnce.Do(func() {
 		seen := map[string]SvcState{}
 		add := func(s SvcState) {
