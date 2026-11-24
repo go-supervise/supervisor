@@ -64,12 +64,8 @@ var unresolvable = map[string]bool{
 	"(reflect.Value).MethodByName": true,
 }
 
-func qname(f *ssa.Function) string {
-	if f.Pkg != nil && f.Signature.Recv() == nil {
-		return f.Pkg.Pkg.Path() + "." + f.Name()
-	}
-	return f.String()
-}
+// qname is the function's full name: "path.Name", or "(T).Name" for a method.
+func qname(f *ssa.Function) string { return f.String() }
 
 // SourceHalf is half 1 of 7.1.2: the system calls reachable from the entry's
 // main over the VTA call graph of the whole program, each with a constant
@@ -226,11 +222,8 @@ func (a *analysis) globalConst(g *ssa.Global) (int64, bool) {
 	if !constGlobals[g.Pkg.Pkg.Path()+"."+g.Name()] {
 		return 0, false
 	}
-	init := g.Pkg.Func("init")
-	if init == nil {
-		return 0, false
-	}
-	for _, b := range init.Blocks {
+	// every ssa package has its synthetic init, empty when nothing is stored
+	for _, b := range g.Pkg.Func("init").Blocks {
 		for _, in := range b.Instrs {
 			if s, ok := in.(*ssa.Store); ok && s.Addr == g {
 				return a.constInt(s.Val)

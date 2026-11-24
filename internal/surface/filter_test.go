@@ -1,7 +1,7 @@
 package surface
 
 import (
-	"strings"
+	"fmt"
 	"testing"
 )
 
@@ -172,7 +172,48 @@ func TestFilterJumpsStayInsideTheProgram(t *testing.T) {
 
 func TestBuildFilterErrorsAreNamed(t *testing.T) {
 	_, err := BuildFilter("riscv64", 1)
-	if err == nil || !strings.Contains(err.Error(), "riscv64") {
+	if err == nil || err.Error() != `surface: no filter for "riscv64"` {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestJumpOffset(t *testing.T) {
+	for _, c := range []struct {
+		from, to int
+		want     uint8
+		err      string
+	}{
+		{5, 6, 0, ""},
+		{5, 260, 254, ""},
+		{5, 261, 255, ""},
+		{5, 262, 0, "surface: filter jump of 256 does not fit"},
+		{5, 5, 0, "surface: filter jump of -1 does not fit"},
+		{5, 4, 0, "surface: filter jump of -2 does not fit"},
+	} {
+		got, err := jumpOffset(c.from, c.to)
+		if got != c.want || (err == nil) != (c.err == "") || err != nil && err.Error() != c.err {
+			t.Errorf("jumpOffset(%d, %d) = %d, %v; want %d, %q", c.from, c.to, got, err, c.want, c.err)
+		}
+	}
+}
+
+// A list too long for BPF's 8-bit jumps is refused, not truncated.
+func TestBuildFilterRefusesAListTooLongToJumpOver(t *testing.T) {
+	saved := AMSteady
+	defer func() { AMSteady = saved }()
+	never := Set(Never)
+	AMSteady = nil
+	for name := range SysNum("arm64") {
+		if !never[name] {
+			AMSteady = append(AMSteady, name)
+		}
+	}
+	_, err := BuildFilter("arm64", 1)
+	var d int
+	if err == nil || len(AMSteady) < 256 {
+		t.Fatalf("%d calls: %v", len(AMSteady), err)
+	}
+	if n, _ := fmt.Sscanf(err.Error(), "surface: filter jump of %d does not fit", &d); n != 1 || d <= 255 {
+		t.Errorf("error %q", err)
 	}
 }

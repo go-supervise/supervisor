@@ -64,7 +64,8 @@ func TestCulprit(t *testing.T) {
 		{"a tgid is compared on 32 bits", []Call{futex, tgHigh}, &futex},
 		{"a number with no name is refused", []Call{futex, unknown}, &unknown},
 	} {
-		got := culprit(arch, leader, c.last)
+		var got *Call
+		noPanic(t, c.name, func() { got = culprit(arch, leader, c.last) })
 		switch {
 		case got == nil && c.want == nil:
 		case got == nil || c.want == nil || got.Tid != c.want.Tid:

@@ -44,6 +44,16 @@ func AuditArch(arch string) (uint32, bool) {
 	return 0, false
 }
 
+// jumpOffset is the Jt of the jump at instruction from to instruction to: BPF
+// jumps only forward, by at most 255.
+func jumpOffset(from, to int) (uint8, error) {
+	d := to - from - 1
+	if d < 0 || d > 255 {
+		return 0, fmt.Errorf("surface: filter jump of %d does not fit", d)
+	}
+	return uint8(d), nil
+}
+
 // BuildFilter is the filter of the dynamic half (7.1.2 item 2) for arch: every
 // call of Allowed(arch) is allowed, tgkill only when its first argument is
 // tgid, openat with AT_FDCWD as its first argument is refused on amd64 (on
@@ -101,15 +111,8 @@ func BuildFilter(arch string, tgid uint32) ([]Insn, error) {
 	killAt := len(p) + nJeq
 	allowAt := killAt + 1
 	blockAt := allowAt + 1
-	jump := func(from, to int) (uint8, error) {
-		d := to - from - 1
-		if d < 0 || d > 255 {
-			return 0, fmt.Errorf("surface: filter jump of %d does not fit", d)
-		}
-		return uint8(d), nil
-	}
 	for _, nr := range plain {
-		jt, err := jump(len(p), allowAt)
+		jt, err := jumpOffset(len(p), allowAt)
 		if err != nil {
 			return nil, err
 		}
@@ -120,22 +123,14 @@ func BuildFilter(arch string, tgid uint32) ([]Insn, error) {
 	if tgkill >= 0 {
 		opAt += 4
 	}
+	// The two argument jeqs sit right before KILL: their targets are at most
+	// four instructions away, so their offsets always fit (a test pins the
+	// decisions they lead to).
 	if tgkill >= 0 {
-		jt, err := jump(len(p), tgAt)
-		if err != nil {
-			return nil, err
-		}
-		p = append(p, Insn{Code: bpfJeqK, Jt: jt, K: uint32(tgkill)})
+		p = append(p, Insn{Code: bpfJeqK, Jt: uint8(tgAt - len(p) - 1), K: uint32(tgkill)})
 	}
 	if openat >= 0 {
-		jt, err := jump(len(p), opAt)
-		if err != nil {
-			return nil, err
-		}
-		p = append(p, Insn{Code: bpfJeqK, Jt: jt, K: uint32(openat)})
-	}
-	if len(p) != killAt {
-		return nil, fmt.Errorf("surface: filter layout broken")
+		p = append(p, Insn{Code: bpfJeqK, Jt: uint8(opAt - len(p) - 1), K: uint32(openat)})
 	}
 	p = append(p, Insn{Code: bpfRetK, K: RetKillProcess}, Insn{Code: bpfRetK, K: RetAllow})
 	if tgkill >= 0 { // ld arg0; jeq tgid -> allow, else kill (BPF jumps only forward)

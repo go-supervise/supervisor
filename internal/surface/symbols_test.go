@@ -75,9 +75,11 @@ func TestSymbolAbsenceOnBinaries(t *testing.T) {
 }
 
 func TestSymbolAbsenceRefusesWhatItCannotRead(t *testing.T) {
-	if _, err := SymbolAbsence(filepath.Join(t.TempDir(), "missing")); err == nil {
-		t.Fatal("a missing file is not a pass")
-	}
+	noPanic(t, "a missing file", func() {
+		if _, err := SymbolAbsence(filepath.Join(t.TempDir(), "missing")); !os.IsNotExist(err) {
+			t.Errorf("a missing file is not a pass: %v", err)
+		}
+	})
 	txt := filepath.Join(t.TempDir(), "x")
 	if err := os.WriteFile(txt, []byte("not an elf"), 0o600); err != nil {
 		t.Fatal(err)
