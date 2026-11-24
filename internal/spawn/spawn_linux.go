@@ -84,21 +84,21 @@ func Start(c *Config) (ch *Child, err error) {
 	if e := inject("M2"); e != nil {
 		return sep("M2", e)
 	}
-	mk := func() error { return unix.Mkdirat(c.TreesFD, c.Epoch, 0o755) }
+	mk := func() error { return sys.mkdirat(c.TreesFD, c.Epoch, 0o755) }
 	e := mk()
 	if errors.Is(e, unix.EEXIST) { // a leftover of svd's own (T5): remove once, retry once
-		_ = unix.Unlinkat(c.TreesFD, c.Epoch, unix.AT_REMOVEDIR)
+		_ = sys.unlinkat(c.TreesFD, c.Epoch, unix.AT_REMOVEDIR)
 		e = mk()
 	}
 	if e != nil {
 		return sep("M2 mkdirat", e)
 	}
-	rb.push(func() { _ = unix.Unlinkat(c.TreesFD, c.Epoch, unix.AT_REMOVEDIR) })
-	cg, e := unix.Openat(c.TreesFD, c.Epoch, unix.O_DIRECTORY|unix.O_PATH|unix.O_CLOEXEC, 0)
+	rb.push(func() { _ = sys.unlinkat(c.TreesFD, c.Epoch, unix.AT_REMOVEDIR) })
+	cg, e := sys.openat(c.TreesFD, c.Epoch, unix.O_DIRECTORY|unix.O_PATH|unix.O_CLOEXEC, 0)
 	if e != nil {
 		return sep("M2 open", e)
 	}
-	rb.push(func() { unix.Close(cg) })
+	rb.push(func() { sys.close(cg) })
 	names := make([]string, 0, len(c.Limits))
 	for k := range c.Limits {
 		names = append(names, k)
@@ -115,34 +115,34 @@ func Start(c *Config) (ch *Child, err error) {
 		return sep("M3", e)
 	}
 	var logP, stP [2]int
-	if e := unix.Pipe2(logP[:], unix.O_CLOEXEC); e != nil {
+	if e := sys.pipe2(logP[:], unix.O_CLOEXEC); e != nil {
 		return sep("M3 log pipe", e)
 	}
-	rb.push(func() { unix.Close(logP[0]); unix.Close(logP[1]) })
-	if e := unix.Pipe2(stP[:], unix.O_CLOEXEC); e != nil {
+	rb.push(func() { sys.close(logP[0]); sys.close(logP[1]) })
+	if e := sys.pipe2(stP[:], unix.O_CLOEXEC); e != nil {
 		return sep("M3 status pipe", e)
 	}
-	rb.push(func() { unix.Close(stP[0]); unix.Close(stP[1]) })
-	sock, e := unix.Socket(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	rb.push(func() { sys.close(stP[0]); sys.close(stP[1]) })
+	sock, e := sys.socket(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 	if e != nil {
 		return sep("M3 socket", e)
 	}
-	rb.push(func() { unix.Close(sock) })
+	rb.push(func() { sys.close(sock) })
 	sa := &unix.SockaddrUnix{Name: "/proc/self/fd/" + strconv.Itoa(c.NotifyDirFD) + "/" + c.NotifyName}
-	bind := func() error { return unix.Bind(sock, sa) }
+	bind := func() error { return sys.bind(sock, sa) }
 	if e = bind(); errors.Is(e, unix.EADDRINUSE) {
-		_ = unix.Unlinkat(c.NotifyDirFD, c.NotifyName, 0)
+		_ = sys.unlinkat(c.NotifyDirFD, c.NotifyName, 0)
 		e = bind()
 	}
 	if e != nil {
 		return sep("M3 bind", e)
 	}
-	rb.push(func() { _ = unix.Unlinkat(c.NotifyDirFD, c.NotifyName, 0) })
+	rb.push(func() { _ = sys.unlinkat(c.NotifyDirFD, c.NotifyName, 0) })
 	plan, e := sealedMemfd("svd-plan", c.Plan)
 	if e != nil {
 		return sep("M3 plan", e)
 	}
-	defer unix.Close(plan) // the child holds its own copy after the fork
+	defer sys.close(plan) // the child holds its own copy after the fork
 
 	// M4: ForkExec into the new mount namespace and the epoch cgroup.
 	if e := inject("M4"); e != nil {
@@ -161,7 +161,7 @@ func Start(c *Config) (ch *Child, err error) {
 	files[fdlayout.StageFD] = uintptr(c.StageFD)
 	files[fdlayout.HelperFD] = uintptr(c.HelperFD)
 	var pidfd int
-	pid, e := syscall.ForkExec("/proc/self/fd/"+strconv.Itoa(fdlayout.HelperFD), []string{"svd", "helper"}, &syscall.ProcAttr{
+	pid, e := sys.forkExec("/proc/self/fd/"+strconv.Itoa(fdlayout.HelperFD), []string{"svd", "helper"}, &syscall.ProcAttr{
 		Env:   []string{},
 		Files: files,
 		Sys: &syscall.SysProcAttr{
@@ -176,38 +176,38 @@ func Start(c *Config) (ch *Child, err error) {
 		return sep("M4 ForkExec", e)
 	}
 	// The child's ends are its own now; the parent keeps the read ends.
-	unix.Close(logP[1])
-	unix.Close(stP[1])
+	sys.close(logP[1])
+	sys.close(stP[1])
 	return &Child{PID: pid, PidFD: pidfd, CgroupFD: cg, LogR: logP[0], StatusR: stP[0], Notify: sock}, nil
 }
 
 func writeAt(dirfd int, name, val string) error {
-	fd, err := unix.Openat(dirfd, name, unix.O_WRONLY|unix.O_CLOEXEC, 0)
+	fd, err := sys.openat(dirfd, name, unix.O_WRONLY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return err
 	}
-	defer unix.Close(fd)
-	_, err = unix.Write(fd, []byte(val))
+	defer sys.close(fd)
+	_, err = sys.write(fd, []byte(val))
 	return err
 }
 
 // sealedMemfd is the plan memfd of M3 (T18): written in full, then sealed
 // with the four seals of H9.
 func sealedMemfd(name string, b []byte) (int, error) {
-	fd, err := unix.MemfdCreate(name, unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING|unix.MFD_NOEXEC_SEAL)
+	fd, err := sys.memfdCreate(name, unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING|unix.MFD_NOEXEC_SEAL)
 	if err != nil {
 		return -1, err
 	}
 	for off := 0; off < len(b); {
-		n, err := unix.Write(fd, b[off:])
+		n, err := sys.write(fd, b[off:])
 		if err != nil {
-			unix.Close(fd)
+			sys.close(fd)
 			return -1, err
 		}
 		off += n
 	}
-	if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, helper.Seals); err != nil {
-		unix.Close(fd)
+	if _, err := sys.fcntlInt(uintptr(fd), unix.F_ADD_SEALS, helper.Seals); err != nil {
+		sys.close(fd)
 		return -1, fmt.Errorf("seal: %w", err)
 	}
 	return fd, nil
@@ -216,6 +216,6 @@ func sealedMemfd(name string, b []byte) (int, error) {
 // Close releases the parent's fds of a child.
 func (c *Child) Close() {
 	for _, fd := range []int{c.PidFD, c.CgroupFD, c.LogR, c.StatusR, c.Notify} {
-		unix.Close(fd)
+		sys.close(fd)
 	}
 }

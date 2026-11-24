@@ -439,14 +439,14 @@ func TestH10(t *testing.T) {
 		t.Run(fmt.Sprintf("park#%d", n), func(t *testing.T) {
 			f := newFake(t)
 			f.failAt["fcntl_dup"] = n
-			wantStep(t, h10(p(ModeService), 50, 51), "H10 park", fdlayout.ExitH10)
+			wantStep(t, h10(p(ModeService), 50, 51, nil), "H10 park", fdlayout.ExitH10)
 		})
 	}
 	for n := 1; n <= 4; n++ {
 		t.Run(fmt.Sprintf("dup3#%d", n), func(t *testing.T) {
 			f := newFake(t)
 			f.failAt["dup3"] = n
-			wantStep(t, h10(p(ModeService), 50, 51), "H10 dup3", fdlayout.ExitH10)
+			wantStep(t, h10(p(ModeService), 50, 51, nil), "H10 dup3", fdlayout.ExitH10)
 			if f.called("exec") != 0 {
 				t.Error("exec after a failed dup3")
 			}
@@ -455,7 +455,7 @@ func TestH10(t *testing.T) {
 	t.Run("close_range", func(t *testing.T) {
 		f := newFake(t)
 		f.failAt["close_range"] = 1
-		wantStep(t, h10(p(ModeService), 50, 51), "H10 close_range", fdlayout.ExitH10)
+		wantStep(t, h10(p(ModeService), 50, 51, nil), "H10 close_range", fdlayout.ExitH10)
 		if f.called("exec") != 0 {
 			t.Error("exec after a failed close_range")
 		}
@@ -463,7 +463,7 @@ func TestH10(t *testing.T) {
 	for _, m := range []Mode{ModeService, ModeSignal} {
 		t.Run("exec "+string(m), func(t *testing.T) {
 			f := newFake(t)
-			wantStep(t, h10(p(m), 50, 51), "H10 exec", fdlayout.ExitH10)
+			wantStep(t, h10(p(m), 50, 51, nil), "H10 exec", fdlayout.ExitH10)
 			if f.called("execveat") != 0 {
 				t.Error("execveat in a mode with /proc")
 			}
@@ -483,7 +483,7 @@ func TestH10(t *testing.T) {
 	}
 	t.Run("lane execveat", func(t *testing.T) {
 		f := newFake(t)
-		wantStep(t, h10(p(ModeLane), 50, 51), "H10 execveat", fdlayout.ExitH10)
+		wantStep(t, h10(p(ModeLane), 50, 51, nil), "H10 execveat", fdlayout.ExitH10)
 		if f.called("exec") != 0 {
 			t.Error("exec in lane mode: there is no /proc")
 		}
@@ -495,14 +495,14 @@ func TestH10(t *testing.T) {
 		f := newFake(t)
 		pl := p(ModeLane)
 		pl.StageArgv = []string{"a\x00b"}
-		wantStep(t, h10(pl, 50, 51), "H10 argv", fdlayout.ExitH10)
+		wantStep(t, h10(pl, 50, 51, nil), "H10 argv", fdlayout.ExitH10)
 		if f.called("execveat") != 0 {
 			t.Error("execveat with a bad argv")
 		}
 	})
 	t.Run("layout", func(t *testing.T) {
 		f := newFake(t)
-		h10(p(ModeService), 50, 51)
+		h10(p(ModeService), 50, 51, nil)
 		wantFcntl := []any{
 			uintptr(fdlayout.StatusW), unix.F_DUPFD_CLOEXEC, 64, uintptr(fdlayout.ReadyFD), unix.F_DUPFD_CLOEXEC, 64,
 			uintptr(50), unix.F_DUPFD_CLOEXEC, 64, uintptr(51), unix.F_DUPFD_CLOEXEC, 64,
@@ -581,10 +581,24 @@ func TestRunSequenceAndRefusals(t *testing.T) {
 			}
 		})
 	}
+	t.Run("H6", func(t *testing.T) {
+		f := newFake(t)
+		pl := credPlan()
+		pl.Regions = []Region{{Path: "/srv/r", ReadOnly: true}}
+		f.srcs["/s/a"], f.srcs["/s/b"] = []byte("x"), []byte("y")
+		f.plan, _ = pl.Marshal()
+		f.failAt["open_tree"] = 1
+		wantStep(t, safeRun(t), "H6 region 0", fdlayout.ExitH6)
+		if f.called("move_mount") != 0 || f.called("memfd") != 0 {
+			t.Error("H7 ran after a refused H6")
+		}
+		f.noLeak(t)
+	})
 	t.Run("signal mode skips H4, H5, H7 and never reads the credentials", func(t *testing.T) {
 		f := newFake(t)
 		pl := credPlan()
 		pl.Mode = ModeSignal
+		pl.Regions = []Region{{Path: "/srv/r", ReadOnly: true}} // H6 is skipped too
 		f.plan, _ = pl.Marshal()
 		f.files[SuidDumpablePath] = []byte("1")
 		f.failAt["mount"], f.failAt["openat2"] = 1, 1

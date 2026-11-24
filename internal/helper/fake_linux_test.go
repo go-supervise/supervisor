@@ -36,6 +36,11 @@ type fake struct {
 	srcByFD map[int][]byte
 	srcOff  map[int]int
 	args    map[string][]any // last arguments of an op
+
+	treeFD   int    // the fd open_tree handed out
+	mntDelta uint64 // added to the mount id of every fd but the tree's
+	noMask   bool   // statx does not set STATX_MNT_ID
+	writable bool   // fstatfs reports no ST_RDONLY
 }
 
 func newFake(t *testing.T) *fake {
@@ -203,6 +208,37 @@ func newFake(t *testing.T) *fake {
 			f.calls = append(f.calls, "move_mount:"+bp)
 			f.args["move_mount"] = append(f.args["move_mount"], fl)
 			return f.hit("move_mount")
+		},
+		openTree: func(d int, p string, fl uint) (int, error) {
+			f.args["open_tree"] = []any{p, fl}
+			if err := f.hit("open_tree"); err != nil {
+				return -1, err
+			}
+			f.treeFD = f.alloc()
+			return f.treeFD, nil
+		},
+		statx: func(d int, p string, fl, mask int, st *unix.Statx_t) error {
+			f.args["statx"] = append(f.args["statx"], d, p, fl, mask)
+			if err := f.hit("statx"); err != nil {
+				return err
+			}
+			if !f.noMask {
+				st.Mask = unix.STATX_MNT_ID
+			}
+			st.Mnt_id = 77
+			if d != f.treeFD {
+				st.Mnt_id += f.mntDelta
+			}
+			return nil
+		},
+		fstatfs: func(fd int, st *unix.Statfs_t) error {
+			if err := f.hit("fstatfs"); err != nil {
+				return err
+			}
+			if !f.writable {
+				st.Flags = unix.ST_RDONLY
+			}
+			return nil
 		},
 		chdir:     func(p string) error { f.calls = append(f.calls, "chdir:"+p); return f.hit("chdir") },
 		pivotRoot: func(n, o string) error { f.calls = append(f.calls, "pivot_root:"+n+":"+o); return f.hit("pivot_root") },

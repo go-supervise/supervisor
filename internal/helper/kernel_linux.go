@@ -36,6 +36,9 @@ type kernelOps struct {
 	fchown            func(fd, uid, gid int) error
 	mountSetattr      func(dirfd int, path string, flags uint, attr *unix.MountAttr) error
 	moveMount         func(fromFD int, fromPath string, toFD int, toPath string, flags int) error
+	openTree          func(dirfd int, path string, flags uint) (int, error)
+	statx             func(dirfd int, path string, flags, mask int, st *unix.Statx_t) error
+	fstatfs           func(fd int, st *unix.Statfs_t) error
 	chdir             func(path string) error
 	pivotRoot         func(newroot, putold string) error
 	unmount           func(target string, flags int) error
@@ -83,6 +86,9 @@ var realKernel = kernelOps{
 	fchown:            unix.Fchown,
 	mountSetattr:      unix.MountSetattr,
 	moveMount:         unix.MoveMount,
+	openTree:          unix.OpenTree,
+	statx:             unix.Statx,
+	fstatfs:           unix.Fstatfs,
 	chdir:             unix.Chdir,
 	pivotRoot:         unix.PivotRoot,
 	unmount:           unix.Unmount,

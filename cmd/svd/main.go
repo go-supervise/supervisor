@@ -10,7 +10,10 @@ import (
 	"github.com/go-supervise/supervisor/internal/helper"
 )
 
-var osExit = os.Exit
+var (
+	osExit    = os.Exit
+	runHelper = helper.Run
+)
 
 // RootCmd builds the command tree.
 func RootCmd() *cobra.Command {
@@ -21,7 +24,7 @@ func RootCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if code := helper.Run(cmd.ErrOrStderr()); code != 0 {
+			if code := runHelper(cmd.ErrOrStderr()); code != 0 {
 				osExit(code)
 			}
 			return nil

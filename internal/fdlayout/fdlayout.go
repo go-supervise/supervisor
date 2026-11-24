@@ -37,6 +37,7 @@ const (
 	ExitH3  = 13
 	ExitH4  = 14
 	ExitH5  = 15
+	ExitH6  = 16
 	ExitH7  = 17
 	ExitH8  = 18
 	ExitH9  = 19

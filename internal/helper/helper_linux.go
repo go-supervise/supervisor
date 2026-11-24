@@ -66,11 +66,15 @@ func run() error {
 	if err := h3(); err != nil {
 		return err
 	}
+	var regions []int
 	if plan.Mode != ModeSignal {
 		if err := H4(); err != nil {
 			return err
 		}
 		if err := h5(); err != nil {
+			return err
+		}
+		if regions, err = h6(plan); err != nil {
 			return err
 		}
 		if err := h7(plan); err != nil {
@@ -88,7 +92,7 @@ func run() error {
 			return err
 		}
 	}
-	return h10(plan, cwd, frameFD)
+	return h10(plan, cwd, frameFD, regions)
 }
 
 // h1: close_range(k, ~0, CLOEXEC); fd 0 is /dev/null, fds 1 and 2 are the
@@ -335,11 +339,13 @@ func h9(p *Plan) (cwd, frameFD int, err error) {
 }
 
 // h10: lay out the stage's descriptors and exec the stage.
-func h10(p *Plan, cwd, frameFD int) error {
+func h10(p *Plan, cwd, frameFD int, regions []int) error {
 	const high = 64
-	// Park every source above the target range, then dup3 into place.
-	srcs := [...]int{fdlayout.StatusW, fdlayout.ReadyFD, frameFD, cwd, fdlayout.StageFD}
-	var parked [len(srcs)]int
+	// Park every source above the target range, then dup3 into place. The
+	// stage fd comes last; the region fds follow it and land at
+	// StageFirstFree upward, where D4 reads them.
+	srcs := append([]int{fdlayout.StatusW, fdlayout.ReadyFD, frameFD, cwd, fdlayout.StageFD}, regions...)
+	parked := make([]int, len(srcs))
 	for i, s := range srcs {
 		fd, err := k.fcntlInt(uintptr(s), unix.F_DUPFD_CLOEXEC, high)
 		if err != nil {
@@ -347,13 +353,21 @@ func h10(p *Plan, cwd, frameFD int) error {
 		}
 		parked[i] = fd
 	}
-	for i, dst := range [...]int{fdlayout.StageStatus, fdlayout.StageReady, fdlayout.StageFrame, fdlayout.StageCwd} {
-		if err := k.dup3(parked[i], dst, 0); err != nil {
+	dsts := []int{fdlayout.StageStatus, fdlayout.StageReady, fdlayout.StageFrame, fdlayout.StageCwd}
+	for i := range regions {
+		dsts = append(dsts, fdlayout.StageFirstFree+i)
+	}
+	for i, dst := range dsts {
+		src := parked[i]
+		if i >= 4 {
+			src = parked[i+1] // skip the stage fd, parked[4]
+		}
+		if err := k.dup3(src, dst, 0); err != nil {
 			return fail("H10 dup3", fdlayout.ExitH10, err)
 		}
 	}
 	stage := parked[4]
-	if e := k.closeRange(fdlayout.StageFirstFree, ^uintptr(0)>>32, unix.CLOSE_RANGE_CLOEXEC); e != nil {
+	if e := k.closeRange(uintptr(fdlayout.StageFirstFree+len(regions)), ^uintptr(0)>>32, unix.CLOSE_RANGE_CLOEXEC); e != nil {
 		return fail("H10 close_range", fdlayout.ExitH10, e)
 	}
 	// The stage and the parked copies are CLOEXEC; the stage fd is still

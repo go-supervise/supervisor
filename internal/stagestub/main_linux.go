@@ -9,6 +9,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"runtime"
 	"strconv"
@@ -129,16 +130,25 @@ func main() {
 	_, _ = unix.Write(fdlayout.StageStatus, b)
 }
 
+// The two kernel calls readAll makes, replaceable by a test.
+var (
+	fstat = unix.Fstat
+	pread = unix.Pread
+)
+
 func readAll(fd int) ([]byte, error) {
 	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
+	if err := fstat(fd, &st); err != nil {
 		return nil, err
 	}
 	buf := make([]byte, st.Size)
 	for off := 0; off < len(buf); {
-		n, err := unix.Pread(fd, buf[off:], int64(off))
-		if err != nil || n == 0 {
+		n, err := pread(fd, buf[off:], int64(off))
+		if err != nil {
 			return nil, err
+		}
+		if n == 0 { // the file is shorter than its size said
+			return nil, io.ErrUnexpectedEOF
 		}
 		off += n
 	}

@@ -29,6 +29,16 @@ type Credential struct {
 	Source string `json:"source"`
 }
 
+// Region is one K6 region: a directory the service may reach (H6, D4).
+type Region struct {
+	Path     string `json:"path"`
+	ReadOnly bool   `json:"ro,omitempty"`
+}
+
+// MaxRegions bounds the regions of one plan; the stage receives them at fds
+// fdlayout.StageFirstFree upward.
+const MaxRegions = 32
+
 // Plan is the core's plan entry as M_p writes it into the sealed memfd.
 // It is trusted (written by M_p from the core's plan).
 type Plan struct {
@@ -36,6 +46,7 @@ type Plan struct {
 	Frame     frame.Frame  `json:"frame"`
 	Cwd       string       `json:"cwd"`
 	Creds     []Credential `json:"creds,omitempty"`
+	Regions   []Region     `json:"regions,omitempty"`
 	CredDir   string       `json:"cred_dir,omitempty"`
 	CredSize  string       `json:"cred_size,omitempty"`
 	StageArgv []string     `json:"stage_argv"`
@@ -56,6 +67,14 @@ func (p *Plan) Validate() error {
 	}
 	if p.Cwd == "" {
 		return errors.New("helper: empty cwd")
+	}
+	if len(p.Regions) > MaxRegions {
+		return fmt.Errorf("helper: %d regions, at most %d", len(p.Regions), MaxRegions)
+	}
+	for _, r := range p.Regions {
+		if r.Path == "" || r.Path[0] != '/' {
+			return fmt.Errorf("helper: region path %q is not absolute", r.Path)
+		}
 	}
 	if len(p.Creds) > 0 && p.CredDir == "" {
 		return errors.New("helper: credentials without a delivery directory")
