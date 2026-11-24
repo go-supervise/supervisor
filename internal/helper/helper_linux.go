@@ -6,11 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 	"strings"
 	"syscall"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 
@@ -44,15 +42,18 @@ func fail(step string, code int, err error) *stepError {
 // On failure it writes `perm` on the status pipe, logs the reason on stderr
 // and returns the step's fixed exit code.
 func Run(stderr io.Writer) int {
-	err := run()
+	err := runSteps()
 	var se *stepError
 	if !errors.As(err, &se) {
 		se = fail("helper", fdlayout.ExitH10, err)
 	}
-	_, _ = unix.Write(fdlayout.StatusW, []byte{fdlayout.StatusPerm})
+	_, _ = k.write(fdlayout.StatusW, []byte{fdlayout.StatusPerm})
 	fmt.Fprintf(stderr, "svd helper: %v\n", se)
 	return se.code
 }
+
+// runSteps is run, replaceable by a test that needs a non-step error.
+var runSteps = run
 
 func run() error {
 	if err := h1(); err != nil {
@@ -93,22 +94,22 @@ func run() error {
 // h1: close_range(k, ~0, CLOEXEC); fd 0 is /dev/null, fds 1 and 2 are the
 // log pipe, getsid(0) == getpid(), no controlling terminal.
 func h1() error {
-	if _, _, e := unix.Syscall(unix.SYS_CLOSE_RANGE, fdlayout.HelperFD, ^uintptr(0)>>32, unix.CLOSE_RANGE_CLOEXEC); e != 0 {
+	if e := k.closeRange(fdlayout.HelperFD, ^uintptr(0)>>32, unix.CLOSE_RANGE_CLOEXEC); e != nil {
 		return fail("H1 close_range", fdlayout.ExitH1, e)
 	}
 	var st, s1, s2 unix.Stat_t
-	if err := unix.Fstat(0, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFCHR || st.Rdev != unix.Mkdev(1, 3) {
+	if err := k.fstat(0, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFCHR || st.Rdev != unix.Mkdev(1, 3) {
 		return fail("H1 fd 0", fdlayout.ExitH1, errors.New("fd 0 is not /dev/null"))
 	}
-	if unix.Fstat(1, &s1) != nil || unix.Fstat(2, &s2) != nil || s1.Dev != s2.Dev || s1.Ino != s2.Ino {
+	if k.fstat(1, &s1) != nil || k.fstat(2, &s2) != nil || s1.Dev != s2.Dev || s1.Ino != s2.Ino {
 		return fail("H1 fds 1,2", fdlayout.ExitH1, errors.New("fds 1 and 2 are not the same log pipe"))
 	}
-	if sid, err := unix.Getsid(0); err != nil || sid != os.Getpid() {
+	if sid, err := k.getsid(0); err != nil || sid != k.getpid() {
 		return fail("H1 session", fdlayout.ExitH1, errors.New("not a session leader"))
 	}
-	if fd, err := unix.Open("/dev/tty", unix.O_RDWR|unix.O_CLOEXEC, 0); err != unix.ENXIO {
+	if fd, err := k.open("/dev/tty", unix.O_RDWR|unix.O_CLOEXEC, 0); err != unix.ENXIO {
 		if err == nil {
-			unix.Close(fd)
+			k.close(fd)
 		}
 		return fail("H1 ctty", fdlayout.ExitH1, errors.New("a controlling terminal exists"))
 	}
@@ -117,17 +118,17 @@ func h1() error {
 
 // h2: the plan from fd 3, a memfd carrying exactly the four seals.
 func h2() (*Plan, error) {
-	seals, err := unix.FcntlInt(fdlayout.Plan, unix.F_GET_SEALS, 0)
+	seals, err := k.fcntlInt(fdlayout.Plan, unix.F_GET_SEALS, 0)
 	if err != nil || !SealsOK(seals) {
 		return nil, fail("H2 seals", fdlayout.ExitH2, fmt.Errorf("plan seals %#x: %v", seals, err))
 	}
 	var st unix.Stat_t
-	if err := unix.Fstat(fdlayout.Plan, &st); err != nil || st.Size > MaxPlan {
+	if err := k.fstat(fdlayout.Plan, &st); err != nil || st.Size > MaxPlan {
 		return nil, fail("H2 size", fdlayout.ExitH2, errors.New("plan size"))
 	}
 	buf := make([]byte, st.Size)
 	for off := 0; off < len(buf); {
-		n, err := unix.Pread(fdlayout.Plan, buf[off:], int64(off))
+		n, err := k.pread(fdlayout.Plan, buf[off:], int64(off))
 		if err != nil || n == 0 {
 			return nil, fail("H2 read", fdlayout.ExitH2, errors.New("short plan"))
 		}
@@ -143,10 +144,10 @@ func h2() (*Plan, error) {
 // h3: oom_score_adj := 0, read back (S1).
 func h3() error {
 	const path = "/proc/self/oom_score_adj"
-	if err := os.WriteFile(path, []byte("0"), 0); err != nil {
+	if err := k.writeFile(path, []byte("0"), 0); err != nil {
 		return fail("H3 write", fdlayout.ExitH3, err)
 	}
-	b, err := os.ReadFile(path)
+	b, err := k.readFile(path)
 	if err != nil || strings.TrimSpace(string(b)) != "0" {
 		return fail("H3 read back", fdlayout.ExitH3, fmt.Errorf("oom_score_adj %q: %v", b, err))
 	}
@@ -155,7 +156,7 @@ func h3() error {
 
 // H4 refuses fs.suid_dumpable = 1 (ErrIsolationUnavailable{suiddumpable, linux}).
 func H4() error {
-	b, err := os.ReadFile(SuidDumpablePath)
+	b, err := k.readFile(SuidDumpablePath)
 	if err != nil {
 		return fail("H4 read", fdlayout.ExitH4, err)
 	}
@@ -167,7 +168,7 @@ func H4() error {
 
 // h5: MS_SLAVE | MS_REC on / before any other mount (S11).
 func h5() error {
-	if err := unix.Mount("", "/", "", unix.MS_SLAVE|unix.MS_REC, ""); err != nil {
+	if err := k.mount("", "/", "", unix.MS_SLAVE|unix.MS_REC, ""); err != nil {
 		return fail("H5 MS_SLAVE", fdlayout.ExitH5, err)
 	}
 	return nil
@@ -175,20 +176,20 @@ func h5() error {
 
 // tmpfsMount builds a detached tmpfs with the given size option and attributes.
 func tmpfsMount(size string, attrs int) (int, error) {
-	fs, err := unix.Fsopen("tmpfs", unix.FSOPEN_CLOEXEC)
+	fs, err := k.fsopen("tmpfs", unix.FSOPEN_CLOEXEC)
 	if err != nil {
 		return -1, err
 	}
-	defer unix.Close(fs)
+	defer k.close(fs)
 	if size != "" {
-		if err := unix.FsconfigSetString(fs, "size", size); err != nil {
+		if err := k.fsconfigSetString(fs, "size", size); err != nil {
 			return -1, err
 		}
 	}
-	if err := unix.FsconfigCreate(fs); err != nil {
+	if err := k.fsconfigCreate(fs); err != nil {
 		return -1, err
 	}
-	return unix.Fsmount(fs, unix.FSMOUNT_CLOEXEC, attrs)
+	return k.fsmount(fs, unix.FSMOUNT_CLOEXEC, attrs)
 }
 
 // h7: credentials onto a private read-only tmpfs (T3). Sources and the
@@ -205,7 +206,7 @@ func h7(p *Plan) error {
 	var srcs []int
 	defer func() {
 		for _, fd := range srcs {
-			unix.Close(fd)
+			k.close(fd)
 		}
 	}()
 	for _, c := range p.Creds {
@@ -214,7 +215,7 @@ func h7(p *Plan) error {
 		}
 		h := *how
 		h.Flags = unix.O_RDONLY | unix.O_CLOEXEC
-		fd, err := unix.Openat2(unix.AT_FDCWD, c.Source, &h)
+		fd, err := k.openat2(unix.AT_FDCWD, c.Source, &h)
 		if err != nil {
 			return fail("H7 open", fdlayout.ExitH7, err)
 		}
@@ -222,46 +223,56 @@ func h7(p *Plan) error {
 	}
 	h := *how
 	h.Flags = unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC
-	dir, err := unix.Openat2(unix.AT_FDCWD, p.CredDir, &h)
+	dir, err := k.openat2(unix.AT_FDCWD, p.CredDir, &h)
 	if err != nil {
 		return fail("H7 dir", fdlayout.ExitH7, err)
 	}
-	defer unix.Close(dir)
+	defer k.close(dir)
 	mfd, err := tmpfsMount(size, unix.MOUNT_ATTR_NOSUID|unix.MOUNT_ATTR_NODEV|unix.MOUNT_ATTR_NOEXEC)
 	if err != nil {
 		return fail("H7 tmpfs", fdlayout.ExitH7, err)
 	}
-	defer unix.Close(mfd)
+	defer k.close(mfd)
+	buf := make([]byte, 32<<10)
+	defer clear(buf)
 	for i, c := range p.Creds {
-		out, err := unix.Openat(mfd, c.Name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC, 0o400)
-		if err != nil {
-			return fail("H7 create", fdlayout.ExitH7, err)
-		}
-		buf := make([]byte, 32<<10)
-		for {
-			n, rerr := unix.Read(srcs[i], buf)
-			if n > 0 {
-				if _, werr := unix.Write(out, buf[:n]); werr != nil {
-					unix.Close(out)
-					return fail("H7 write", fdlayout.ExitH7, werr)
-				}
-			}
-			if rerr != nil || n == 0 {
-				break
-			}
-		}
-		clear(buf)
-		err = unix.Fchown(out, int(p.Frame.UID), int(p.Frame.GID))
-		unix.Close(out)
-		if err != nil {
-			return fail("H7 chown", fdlayout.ExitH7, err)
+		if err := deliver(mfd, srcs[i], c.Name, int(p.Frame.UID), int(p.Frame.GID), buf); err != nil {
+			return err
 		}
 	}
-	if err := unix.MountSetattr(mfd, "", unix.AT_EMPTY_PATH, &unix.MountAttr{Attr_set: unix.MOUNT_ATTR_RDONLY}); err != nil {
+	if err := k.mountSetattr(mfd, "", unix.AT_EMPTY_PATH, &unix.MountAttr{Attr_set: unix.MOUNT_ATTR_RDONLY}); err != nil {
 		return fail("H7 rdonly", fdlayout.ExitH7, err)
 	}
-	if err := unix.MoveMount(mfd, "", dir, "", unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH); err != nil {
+	if err := k.moveMount(mfd, "", dir, "", unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH); err != nil {
 		return fail("H7 move_mount", fdlayout.ExitH7, err)
+	}
+	return nil
+}
+
+// deliver copies one credential into the tmpfs as a 0400 file owned by u:g.
+// A read error is a refusal: a truncated credential must never be delivered.
+func deliver(mfd, src int, name string, uid, gid int, buf []byte) error {
+	out, err := k.openat(mfd, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC, 0o400)
+	if err != nil {
+		return fail("H7 create", fdlayout.ExitH7, err)
+	}
+	defer k.close(out)
+	for {
+		n, rerr := k.read(src, buf)
+		if n > 0 {
+			if w, werr := k.write(out, buf[:n]); werr != nil || w != n {
+				return fail("H7 write", fdlayout.ExitH7, fmt.Errorf("short or failed write: %d of %d: %v", w, n, werr))
+			}
+		}
+		if rerr != nil {
+			return fail("H7 read", fdlayout.ExitH7, rerr)
+		}
+		if n == 0 {
+			break
+		}
+	}
+	if err := k.fchown(out, uid, gid); err != nil {
+		return fail("H7 chown", fdlayout.ExitH7, err)
 	}
 	return nil
 }
@@ -273,21 +284,21 @@ func h8() error {
 	if err != nil {
 		return fail("H8 tmpfs", fdlayout.ExitH8, err)
 	}
-	defer unix.Close(mfd)
+	defer k.close(mfd)
 	// pivot_root needs a mount of this namespace that is not the root mount
 	// (measured: stacking over "/" gives EBUSY). /proc is the one directory
 	// the helper already relies on; the old root, /proc included, is
 	// detached below.
-	if err := unix.MoveMount(mfd, "", unix.AT_FDCWD, "/proc", unix.MOVE_MOUNT_F_EMPTY_PATH); err != nil {
+	if err := k.moveMount(mfd, "", unix.AT_FDCWD, "/proc", unix.MOVE_MOUNT_F_EMPTY_PATH); err != nil {
 		return fail("H8 move_mount", fdlayout.ExitH8, err)
 	}
-	if err := unix.Chdir("/proc"); err != nil {
+	if err := k.chdir("/proc"); err != nil {
 		return fail("H8 chdir", fdlayout.ExitH8, err)
 	}
-	if err := unix.PivotRoot(".", "."); err != nil {
+	if err := k.pivotRoot(".", "."); err != nil {
 		return fail("H8 pivot_root", fdlayout.ExitH8, err)
 	}
-	if err := unix.Unmount(".", unix.MNT_DETACH); err != nil {
+	if err := k.unmount(".", unix.MNT_DETACH); err != nil {
 		return fail("H8 umount", fdlayout.ExitH8, err)
 	}
 	return nil
@@ -295,23 +306,29 @@ func h8() error {
 
 // h9: the working directory as an O_PATH fd, and the sealed frame.
 func h9(p *Plan) (cwd, frameFD int, err error) {
-	cwd, err = unix.Open(p.Cwd, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	cwd, err = k.open(p.Cwd, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return 0, 0, fail("H9 cwd", fdlayout.ExitH9, err)
 	}
 	f := p.Frame
 	b, err := f.Encode()
 	if err != nil {
+		k.close(cwd)
 		return 0, 0, fail("H9 encode", fdlayout.ExitH9, err)
 	}
-	frameFD, err = unix.MemfdCreate("svd-frame", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING|unix.MFD_NOEXEC_SEAL)
+	frameFD, err = k.memfdCreate("svd-frame", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING|unix.MFD_NOEXEC_SEAL)
 	if err != nil {
+		k.close(cwd)
 		return 0, 0, fail("H9 memfd", fdlayout.ExitH9, err)
 	}
-	if _, err := unix.Write(frameFD, b); err != nil {
-		return 0, 0, fail("H9 write", fdlayout.ExitH9, err)
+	if n, err := k.write(frameFD, b); err != nil || n != len(b) {
+		k.close(cwd)
+		k.close(frameFD)
+		return 0, 0, fail("H9 write", fdlayout.ExitH9, fmt.Errorf("wrote %d of %d: %v", n, len(b), err))
 	}
-	if _, err := unix.FcntlInt(uintptr(frameFD), unix.F_ADD_SEALS, Seals); err != nil {
+	if _, err := k.fcntlInt(uintptr(frameFD), unix.F_ADD_SEALS, Seals); err != nil {
+		k.close(cwd)
+		k.close(frameFD)
 		return 0, 0, fail("H9 seal", fdlayout.ExitH9, err)
 	}
 	return cwd, frameFD, nil
@@ -324,25 +341,25 @@ func h10(p *Plan, cwd, frameFD int) error {
 	srcs := [...]int{fdlayout.StatusW, fdlayout.ReadyFD, frameFD, cwd, fdlayout.StageFD}
 	var parked [len(srcs)]int
 	for i, s := range srcs {
-		fd, err := unix.FcntlInt(uintptr(s), unix.F_DUPFD_CLOEXEC, high)
+		fd, err := k.fcntlInt(uintptr(s), unix.F_DUPFD_CLOEXEC, high)
 		if err != nil {
 			return fail("H10 park", fdlayout.ExitH10, err)
 		}
 		parked[i] = fd
 	}
 	for i, dst := range [...]int{fdlayout.StageStatus, fdlayout.StageReady, fdlayout.StageFrame, fdlayout.StageCwd} {
-		if err := unix.Dup3(parked[i], dst, 0); err != nil {
+		if err := k.dup3(parked[i], dst, 0); err != nil {
 			return fail("H10 dup3", fdlayout.ExitH10, err)
 		}
 	}
 	stage := parked[4]
-	if _, _, e := unix.Syscall(unix.SYS_CLOSE_RANGE, fdlayout.StageFirstFree, ^uintptr(0)>>32, unix.CLOSE_RANGE_CLOEXEC); e != 0 {
+	if e := k.closeRange(fdlayout.StageFirstFree, ^uintptr(0)>>32, unix.CLOSE_RANGE_CLOEXEC); e != nil {
 		return fail("H10 close_range", fdlayout.ExitH10, e)
 	}
 	// The stage and the parked copies are CLOEXEC; the stage fd is still
 	// needed until the exec itself, and is closed by it.
 	if p.Mode != ModeLane {
-		err := syscall.Exec("/proc/self/fd/"+strconv.Itoa(stage), p.StageArgv, []string{})
+		err := k.exec("/proc/self/fd/"+strconv.Itoa(stage), p.StageArgv, []string{})
 		return fail("H10 exec", fdlayout.ExitH10, err)
 	}
 	argv, err := syscall.SlicePtrFromStrings(p.StageArgv)
@@ -350,8 +367,5 @@ func h10(p *Plan, cwd, frameFD int) error {
 		return fail("H10 argv", fdlayout.ExitH10, err)
 	}
 	envp, _ := syscall.SlicePtrFromStrings([]string{})
-	empty, _ := unix.BytePtrFromString("")
-	_, _, e := unix.Syscall6(unix.SYS_EXECVEAT, uintptr(stage), uintptr(unsafe.Pointer(empty)),
-		uintptr(unsafe.Pointer(&argv[0])), uintptr(unsafe.Pointer(&envp[0])), unix.AT_EMPTY_PATH, 0)
-	return fail("H10 execveat", fdlayout.ExitH10, e)
+	return fail("H10 execveat", fdlayout.ExitH10, k.execveat(stage, argv, envp))
 }
