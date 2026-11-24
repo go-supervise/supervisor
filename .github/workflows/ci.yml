@@ -45,7 +45,15 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: ${{ matrix.go }}
-      - run: go test -count=1 -timeout 35m ./...
+      # The syscall-surface gate judges the monitor as built by the release
+      # toolchain (go 1.27): its R_go tables are generated per toolchain, and
+      # go 1.25's standard library reaches mprotect where 1.27's does not. So the
+      # surface packages run on 1.27 only; every other package runs on both.
+      - name: every package but the syscall-surface gate
+        run: go test -count=1 -timeout 35m . ./cmd/svd/ ./cmd/svd-monitor/ ./fsm/ ./internal/fdlayout/ ./internal/frame/ ./internal/helper/ ./internal/keyring/ ./internal/monitor/ ./internal/spawn/ ./internal/stagestub/
+      - name: the syscall-surface gate (source and symbol halves)
+        if: matrix.go == '1.27'
+        run: go test -count=1 -timeout 35m ./cmd/syscallsurface/ ./internal/surface/...
 
   # Privileged lane (SUPERVISOR.md 7.1.1): the spawn path and svd helper under
   # root with every capability, in a container. SVD_PRIVILEGED=1 makes an absent
