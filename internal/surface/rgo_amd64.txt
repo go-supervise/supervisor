@@ -1,0 +1,2 @@
+# R_go for linux/amd64: placeholder until `syscallsurface rgo` regenerates it.
+mmap

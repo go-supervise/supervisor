@@ -2,6 +2,12 @@
 // (SUPERVISOR.md 7.1.1): M4's Files set H, and the stage's set S.
 package fdlayout
 
+// Seals are the four seals of H9 on every sealed memfd (the plan, the frame):
+// F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE. They live here,
+// in a package that imports nothing, so that M_p can use them without linking
+// the helper.
+const Seals = 0x1 | 0x2 | 0x4 | 0x8
+
 // The helper's set H, installed by Go's fork child (C1) with dup3.
 const (
 	DevNull  = 0 // /dev/null

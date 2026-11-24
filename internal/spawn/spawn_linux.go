@@ -6,7 +6,6 @@ package spawn
 
 import (
 	"errors"
-	"fmt"
 	"sort"
 	"strconv"
 	"syscall"
@@ -14,7 +13,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/go-supervise/supervisor/internal/fdlayout"
-	"github.com/go-supervise/supervisor/internal/helper"
 )
 
 // Config is one spawn. Every fd is owned by the caller and is O_CLOEXEC.
@@ -206,12 +204,19 @@ func sealedMemfd(name string, b []byte) (int, error) {
 		}
 		off += n
 	}
-	if _, err := sys.fcntlInt(uintptr(fd), unix.F_ADD_SEALS, helper.Seals); err != nil {
+	if _, err := sys.fcntlInt(uintptr(fd), unix.F_ADD_SEALS, fdlayout.Seals); err != nil {
 		sys.close(fd)
-		return -1, fmt.Errorf("seal: %w", err)
+		return -1, &sealError{err}
 	}
 	return fd, nil
 }
+
+// sealError wraps a failed F_ADD_SEALS; it is a type of its own so that M_p
+// does not link fmt (and with it os) for one message.
+type sealError struct{ err error }
+
+func (e *sealError) Error() string { return "seal: " + e.err.Error() }
+func (e *sealError) Unwrap() error { return e.err }
 
 // Close releases the parent's fds of a child.
 func (c *Child) Close() {

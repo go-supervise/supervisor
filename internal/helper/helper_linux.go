@@ -18,6 +18,9 @@ import (
 // The four seals of H9 (and of the plan memfd, T18).
 const Seals = unix.F_SEAL_WRITE | unix.F_SEAL_GROW | unix.F_SEAL_SHRINK | unix.F_SEAL_SEAL
 
+// Seals must equal fdlayout.Seals, which M_p uses; the compiler checks it.
+var _ = [1]struct{}{}[Seals-fdlayout.Seals]
+
 // SealsOK reports whether an F_GET_SEALS result is exactly the four seals.
 // MFD_NOEXEC_SEAL makes the kernel add F_SEAL_EXEC (0x20) itself (measured:
 // 0x2f), so that bit is not part of the comparison.
