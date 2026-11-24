@@ -19,6 +19,12 @@ const fix = "./internal/surface/testdata/fix/"
 // the error.
 func run(t *testing.T, args ...string) (string, string, error) {
 	t.Helper()
+	// a command that crashes is a failed assertion, not a dead test binary
+	defer func() {
+		if p := recover(); p != nil {
+			t.Fatalf("%v crashed: %v", args, p)
+		}
+	}()
 	var out, errb bytes.Buffer
 	root := RootCmd()
 	root.SetArgs(args)
@@ -107,8 +113,8 @@ func TestSysnumCheckAndWrite(t *testing.T) {
 	if want := stale + " is out of date: run `syscallsurface sysnum --arch amd64 --out " + stale + "`"; err == nil || err.Error() != want {
 		t.Errorf("stale: %v, want %q", err, want)
 	}
-	if _, _, err := run(t, "sysnum", "--dir", "../..", "--arch", "amd64", "--out", filepath.Join(t.TempDir(), "missing"), "--check"); err == nil {
-		t.Error("--check of a missing file is not a pass")
+	if _, _, err := run(t, "sysnum", "--dir", "../..", "--arch", "amd64", "--out", filepath.Join(t.TempDir(), "missing"), "--check"); err == nil || !os.IsNotExist(err) {
+		t.Errorf("--check of a missing file must say it cannot read it, not that it is stale: %v", err)
 	}
 	// writing, then checking what was written
 	written := filepath.Join(t.TempDir(), "w")
