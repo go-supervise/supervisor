@@ -1,4 +1,4 @@
-//go:build linux && !canary_never && !canary_new && !canary_rawnr
+//go:build linux && !canary_never && !canary_new && !canary_rawnr && !canary_forkchild && !canary_forkclone
 
 package monitor
 

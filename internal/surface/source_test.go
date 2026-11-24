@@ -1,6 +1,9 @@
 package surface
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,7 +17,14 @@ func source(t *testing.T, arch, name string, tags ...string) *Result {
 	if testing.Short() {
 		t.Skip("source half: loads and analyses the whole program (the gate1 job runs it)")
 	}
-	r, err := SourceHalf(Options{Dir: "../..", Entry: fixPkg + name, GOARCH: arch, Tags: tags})
+	o := Options{Dir: "../..", Entry: fixPkg + name, GOARCH: arch, Tags: tags}
+	// the fixtures that exercise the checks made INSIDE the one function allowed
+	// to build a SysProcAttr are that function; every other fixture is not
+	switch name {
+	case "attr", "attrglobal", "attrloaded", "forkok":
+		o.AttrConstructors = []string{"github.com/go-supervise/supervisor/" + fixDir + name + "."}
+	}
+	r, err := SourceHalf(o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +60,8 @@ func TestSourceHalfFixtures(t *testing.T) {
 			`source: github.com/go-supervise/supervisor/internal/surface/testdata/fix/unsafe imports unsafe`,
 		}},
 		{"reflect", nil, []string{
+			`source: github.com/go-supervise/supervisor/internal/surface/testdata/fix/reflect imports "reflect"`,
+			`source: github.com/go-supervise/supervisor/internal/surface/testdata/fix/reflect imports reflect`,
 			`source: unresolved call (reflect.Value).Call is reachable (` + fixDir + `reflect/main.go:7:33)`,
 		}},
 	}
@@ -80,6 +92,12 @@ func TestSourceHalfRefusesWhatItCouldNotSee(t *testing.T) {
 		{"asm", []string{`has no Go body`, `asm.raw`, `holds the non-Go file raw_amd64.s`}},
 		{"attrglobal", []string{`SysProcAttr field Credential set at ` + fixDir + `attrglobal/main.go:`}},
 		{"attrloaded", []string{`SysProcAttr field Chroot set at ` + fixDir + `attrloaded/main.go:`}},
+		// the type itself is refused outside the one constructor, so no way of
+		// writing a field is left to find
+		{"instgeneric", []string{`syscall.SysProcAttr is used in `, `instgeneric.configure`, `outside the one function that may build it`}},
+		{"aliasattr", []string{`syscall.SysProcAttr is used in `, `aliasattr.main`}},
+		{"definedattr", []string{`syscall.Credential, or a type of the layout of it or of SysProcAttr, is used in `, `definedattr.main`}},
+		{"reflectset", []string{`reflectset imports reflect`}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -94,6 +112,50 @@ func TestSourceHalfRefusesWhatItCouldNotSee(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A dependency whose module path has no dot in its first element (a local
+// replacement) is not the standard library: its assembly and its function with
+// no body are refused like any other module's.
+func TestSourceHalfRefusesAssemblyInADotlessModule(t *testing.T) {
+	if testing.Short() {
+		t.Skip("loads packages (the gate1 job runs it)")
+	}
+	ver, err := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "golang.org/x/sys").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum, err := os.ReadFile("../../go.sum")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"go.mod":               "module example.test/g\n\ngo 1.25.0\n\nrequire (\n\tevil v0.0.0\n\tgolang.org/x/sys " + strings.TrimSpace(string(ver)) + "\n)\n\nreplace evil => ./evil\n",
+		"go.sum":               string(sum),
+		"main.go":              "package main\n\nimport \"evil/raw\"\n\nfunc main() { _ = raw.Raw(1, 2, 3) }\n",
+		"evil/go.mod":          "module evil\n\ngo 1.25.0\n",
+		"evil/raw/raw.go":      "package raw\n\nfunc Raw(nr, a1, a2 uintptr) uintptr\n",
+		"evil/raw/raw_amd64.s": "#include \"textflag.h\"\n\nTEXT ·Raw(SB), NOSPLIT, $0-32\n\tMOVQ nr+0(FP), AX\n\tMOVQ a1+8(FP), DI\n\tMOVQ a2+16(FP), SI\n\tSYSCALL\n\tMOVQ AX, ret+24(FP)\n\tRET\n",
+	} {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := SourceHalf(Options{Dir: dir, Entry: ".", GOARCH: "amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := strings.Join(r.Failures, "\n")
+	for _, w := range []string{`evil/raw holds the non-Go file raw_amd64.s`, `reached function evil/raw.Raw has no Go body`} {
+		if !strings.Contains(all, w) {
+			t.Errorf("failures lack %q:\n%s", w, all)
+		}
 	}
 }
 

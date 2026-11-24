@@ -74,9 +74,15 @@ func TestJudgeFailsOnASigsysInADescendant(t *testing.T) {
 		})
 	}
 	// a thread of the leader's own process is judged by the leader's status
-	own := &Recording{Leader: leader, Sigsys: []Death{{Tid: 103, Group: leader}}}
-	if got := Judge(arch, own, 0); len(got) != 0 {
+	own := &Recording{Leader: leader, Signal: sigSYS, Sigsys: []Death{{Tid: 103, Group: leader}}}
+	if got := Judge(arch, own, 0); len(got) != 1 || !strings.HasPrefix(got[0], "dynamic: svd-monitor killed by SIGSYS") {
 		t.Fatalf("a thread of the leader's process was judged twice: %v", got)
+	}
+	// the same death with the leader alive is a process booked in the leader's
+	// group (a clone with another exit signal), and is reported
+	alive := &Recording{Leader: leader, Sigsys: []Death{{Tid: 103, Group: leader, Call: kill, HasCall: true}}}
+	if got := Judge(arch, alive, 0); len(got) != 1 || !strings.HasPrefix(got[0], "dynamic: a descendant process (pid 100) was killed by SIGSYS at system call") {
+		t.Fatalf("a death in the leader's group with the leader alive was dropped: %v", got)
 	}
 }
 

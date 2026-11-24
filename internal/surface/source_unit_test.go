@@ -26,7 +26,7 @@ func noPanic(t *testing.T, what string, f func()) {
 
 func TestNoBodyIgnoresWhatHasNoPackage(t *testing.T) {
 	noPanic(t, "noBody of a function with no package", func() {
-		if noBody(&ssa.Function{}) {
+		if (&analysis{}).noBody(&ssa.Function{}) {
 			t.Error("a function with no package is not a bodyless one")
 		}
 	})
@@ -198,29 +198,81 @@ func TestOnlyFromForkChildNeedsCallers(t *testing.T) {
 	})
 }
 
-func TestIsSysProcAttr(t *testing.T) {
+func TestAttrKind(t *testing.T) {
 	pkg := types.NewPackage("syscall", "syscall")
-	named := func(p *types.Package, name string) *types.Named {
-		return types.NewNamed(types.NewTypeName(token.NoPos, p, name, nil), types.NewStruct(nil, nil), nil)
+	field := func(name string) *types.Var {
+		return types.NewField(token.NoPos, pkg, name, types.Typ[types.Int], false)
 	}
+	attrStruct := types.NewStruct([]*types.Var{field("Chroot"), field("Setsid")}, nil)
+	credStruct := types.NewStruct([]*types.Var{field("Uid")}, nil)
+	otherStruct := types.NewStruct([]*types.Var{field("Chroot")}, nil)
+	named := func(p *types.Package, name string, u types.Type) *types.Named {
+		return types.NewNamed(types.NewTypeName(token.NoPos, p, name, nil), u, nil)
+	}
+	k := attrTypes{attr: attrStruct, cred: credStruct}
+	attr := named(pkg, "SysProcAttr", attrStruct)
+	mine := types.NewPackage("example.test/m", "m")
 	for _, c := range []struct {
 		name string
 		t    types.Type
-		want bool
+		want int
 	}{
-		{"*syscall.SysProcAttr", types.NewPointer(named(pkg, "SysProcAttr")), true},
-		{"the value, not the pointer", named(pkg, "SysProcAttr"), false},
-		{"an int", types.Typ[types.Int], false},
-		{"a pointer to an int", types.NewPointer(types.Typ[types.Int]), false},
-		{"another name", types.NewPointer(named(pkg, "Other")), false},
-		{"another package", types.NewPointer(named(types.NewPackage("os", "os"), "SysProcAttr")), false},
-		{"no package", types.NewPointer(named(nil, "SysProcAttr")), false},
+		{"SysProcAttr", attr, kindAttr},
+		{"*SysProcAttr", types.NewPointer(attr), kindAttr},
+		{"[]*SysProcAttr", types.NewSlice(types.NewPointer(attr)), kindAttr},
+		{"[2]SysProcAttr", types.NewArray(attr, 2), kindAttr},
+		{"chan *SysProcAttr", types.NewChan(types.SendRecv, types.NewPointer(attr)), kindAttr},
+		{"map[int]*SysProcAttr", types.NewMap(types.Typ[types.Int], types.NewPointer(attr)), kindAttr},
+		{"map[*SysProcAttr]int", types.NewMap(types.NewPointer(attr), types.Typ[types.Int]), kindAttr},
+		{"a result tuple", types.NewTuple(types.NewVar(token.NoPos, nil, "", types.Typ[types.Int]), types.NewVar(token.NoPos, nil, "", types.NewPointer(attr))), kindAttr},
+		{"Credential", named(pkg, "Credential", credStruct), kindOther},
+		{"a defined type of the SysProcAttr struct", named(mine, "B", attrStruct), kindOther},
+		{"a pointer to a defined type of the Credential struct", types.NewPointer(named(mine, "C", credStruct)), kindOther},
+		{"an unnamed struct of the layout", attrStruct, kindOther},
+		{"a defined pointer type", named(mine, "P", types.NewPointer(attr)), kindAttr},
+		{"an int", types.Typ[types.Int], kindNone},
+		{"a pointer to an int", types.NewPointer(types.Typ[types.Int]), kindNone},
+		{"another struct", named(mine, "O", otherStruct), kindNone},
+		{"another name in syscall", named(pkg, "Other", otherStruct), kindNone},
+		{"another package", named(types.NewPackage("os", "os"), "SysProcAttr", otherStruct), kindNone},
+		{"no package", named(nil, "SysProcAttr", otherStruct), kindNone},
+		{"an empty tuple", types.NewTuple(), kindNone},
 	} {
 		noPanic(t, c.name, func() {
-			if got := isSysProcAttr(c.t); got != c.want {
-				t.Errorf("%s: %v, want %v", c.name, got, c.want)
+			if got := k.kind(c.t); got != c.want {
+				t.Errorf("%s: kind %d, want %d", c.name, got, c.want)
 			}
 		})
+	}
+	// without the syscall package's structs only the names count
+	noPanic(t, "no structs", func() {
+		if got := (attrTypes{}).kind(named(mine, "B", attrStruct)); got != kindNone {
+			t.Errorf("a layout with no reference struct: kind %d", got)
+		}
+		if got := (attrTypes{}).kind(attr); got != kindAttr {
+			t.Errorf("the name with no reference struct: kind %d", got)
+		}
+	})
+}
+
+func TestNameAllowed(t *testing.T) {
+	const fn = "example.test/m/spawn.Start"
+	for _, c := range []struct {
+		ctors []string
+		want  bool
+	}{
+		{nil, false},
+		{[]string{"example.test/m/spawn.Other"}, false},
+		{[]string{fn}, true},
+		{[]string{"x", fn}, true},
+		{[]string{"example.test/m/spawn.Star"}, false}, // an exact name, not a prefix
+		{[]string{"example.test/m/spawn."}, true},      // a package
+		{[]string{"example.test/m/spa."}, false},
+		{[]string{"example.test/m/spawn"}, false},
+	} {
+		if got := nameAllowed(fn, c.ctors); got != c.want {
+			t.Errorf("nameAllowed(%q, %q) = %v, want %v", fn, c.ctors, got, c.want)
+		}
 	}
 }
 

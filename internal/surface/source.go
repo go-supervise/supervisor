@@ -25,6 +25,28 @@ type Options struct {
 	Entry  string   // package pattern of the entry, default ./cmd/svd-monitor
 	GOARCH string   // amd64 or arm64
 	Tags   []string // build tags (the canary_* tags of the negative control)
+	// AttrConstructors are the functions (a trailing dot: every function of a
+	// package) that may build a syscall.SysProcAttr; nil means the monitor's one,
+	// spawn.Start. Every other reference to the type is refused.
+	AttrConstructors []string
+}
+
+// spawnStart is the one function of the monitor that builds a SysProcAttr.
+const spawnStart = "github.com/go-supervise/supervisor/internal/spawn.Start"
+
+// importAllowed are the imports of unsafe, reflect and C that a package outside
+// the standard library may make ("<package> <import>"); asmAllowed likewise its
+// assembly files ("<package> <file>"). Everything else is refused: reflect can
+// set any field, unsafe any memory, and assembly issues any system call.
+//
+// golang.org/x/sys/unix is the system-call layer itself: its unsafe pointers
+// and its assembly trampolines are the sinks, whose numbers are all checked.
+var importAllowed = map[string]bool{
+	unixPath + " unsafe": true,
+}
+var asmAllowed = map[string]bool{
+	unixPath + " asm_linux_amd64.s": true,
+	unixPath + " asm_linux_arm64.s": true,
 }
 
 // Result is a half's verdict: Failures empty means green.
@@ -57,11 +79,29 @@ var sinks = map[string]bool{
 	"syscall.runtime_doAllThreadsSyscall": true,
 }
 
-// stdlibPath reports whether an import path belongs to the Go standard
-// library (no dot in its first element); a module path always has one.
-func stdlibPath(p string) bool {
-	first, _, _ := strings.Cut(p, "/")
-	return !strings.Contains(first, ".")
+// pkgOf is the package a function was written in: an instantiated generic has
+// none of its own, its origin does.
+func pkgOf(f *ssa.Function) *ssa.Package {
+	if f.Pkg == nil {
+		if o := f.Origin(); o != nil {
+			return o.Pkg
+		}
+	}
+	return f.Pkg
+}
+
+// topOf is the outermost function f was written in (a closure's enclosing
+// function, an instantiation's generic).
+func topOf(f *ssa.Function) *ssa.Function {
+	for {
+		if o := f.Origin(); o != nil {
+			f = o
+		}
+		if f.Parent() == nil {
+			return f
+		}
+		f = f.Parent()
+	}
 }
 
 // bodylessAllowed are the exact functions outside the standard library that may
@@ -72,12 +112,12 @@ var bodylessAllowed = map[string]bool{}
 
 // noBody reports whether f is a reached Go function declared without a body
 // that is neither a sink, nor the standard library's, nor allowlisted.
-func noBody(f *ssa.Function) bool {
+func (a *analysis) noBody(f *ssa.Function) bool {
 	if f.Pkg == nil || f.Synthetic != "" || len(f.Blocks) > 0 {
 		return false
 	}
 	name := qname(f)
-	return !sinks[name] && !stdlibPath(f.Pkg.Pkg.Path()) && !bodylessAllowed[name]
+	return !sinks[name] && !a.std[f.Pkg.Pkg.Path()] && !bodylessAllowed[name]
 }
 
 // openers are the dirfd-taking open calls whose first argument must not be
@@ -162,6 +202,15 @@ func SourceHalf(o Options) (*Result, error) {
 	a := &analysis{o: o, prog: prog, g: g, names: sysNames(o.GOARCH), parent: map[*ssa.Function]*callgraph.Edge{}}
 	a.res.Chains = map[string][]string{}
 	a.module = modulePath(pkgs[mainIdx])
+	// the standard library is what no module holds; a path's spelling says
+	// nothing (a module may be called "evil", and replaced by a directory)
+	a.std = map[string]bool{}
+	packages.Visit(all, func(p *packages.Package) bool {
+		if p.Module == nil {
+			a.std[p.PkgPath] = true
+		}
+		return true
+	}, nil)
 	a.reach(roots)
 	a.checkSites()
 	a.checkAttr()
@@ -189,6 +238,7 @@ type analysis struct {
 	g       *callgraph.Graph
 	names   map[int64]string
 	module  string
+	std     map[string]bool                   // import paths no module holds: the standard library
 	parent  map[*ssa.Function]*callgraph.Edge // BFS tree: how a function was first reached
 	order   []*ssa.Function
 	inOrder map[*ssa.Function]bool
@@ -316,7 +366,7 @@ func (a *analysis) checkSites() {
 		if unresolvable[f.String()] {
 			a.fail("unresolved call %s is reachable (%s)", f.String(), a.chainSite(f))
 		}
-		if noBody(f) {
+		if a.noBody(f) {
 			a.fail("reached function %s has no Go body (%s)", f.String(), a.chainSite(f))
 		}
 		n := a.g.Nodes[f]
@@ -435,37 +485,144 @@ func (a *analysis) compare() {
 	}
 }
 
-// checkAttr refuses, in every reached function outside the standard library,
-// each access to a syscall.SysProcAttr field outside AllowedAttr, whatever the
-// base (a local, a package variable, a struct holding one, a pointer loaded
-// back), and every SysProcAttr allocated there that is not a plain literal.
-func (a *analysis) checkAttr() {
-	ok := Set(AllowedAttr)
-	field := func(in ssa.Instruction, x ssa.Value, idx int) {
-		t := x.Type()
-		if p, isPtr := t.Underlying().(*types.Pointer); isPtr {
-			t = p.Elem()
+// The kinds of reference to the types that carry the fork child's privileges.
+const (
+	kindNone  = iota
+	kindAttr  // syscall.SysProcAttr itself
+	kindOther // syscall.Credential, or a type whose struct is identical to either
+)
+
+// attrTypes holds the underlying structs of syscall.SysProcAttr and
+// syscall.Credential, to recognise a defined type or an alias that is one.
+type attrTypes struct{ attr, cred *types.Struct }
+
+func (a *analysis) attrTypes() attrTypes {
+	var k attrTypes
+	if p := a.prog.ImportedPackage("syscall"); p != nil {
+		if o := p.Pkg.Scope().Lookup("SysProcAttr"); o != nil {
+			k.attr, _ = o.Type().Underlying().(*types.Struct)
 		}
-		if !isSysProcAttrStruct(t) {
-			return
-		}
-		if name := t.Underlying().(*types.Struct).Field(idx).Name(); !ok[name] {
-			a.fail("SysProcAttr field %s set at %s", name, a.pos(in.Pos()))
+		if o := p.Pkg.Scope().Lookup("Credential"); o != nil {
+			k.cred, _ = o.Type().Underlying().(*types.Struct)
 		}
 	}
+	return k
+}
+
+// kind says whether t is, or is made of, one of the two types: through
+// aliases, pointers, slices, arrays, maps, channels and result tuples, and by
+// layout for a defined or unnamed struct.
+func (k attrTypes) kind(t types.Type) int {
+	switch x := types.Unalias(t).(type) {
+	case *types.Pointer:
+		return k.kind(x.Elem())
+	case *types.Slice:
+		return k.kind(x.Elem())
+	case *types.Array:
+		return k.kind(x.Elem())
+	case *types.Chan:
+		return k.kind(x.Elem())
+	case *types.Map:
+		return max(k.kind(x.Key()), k.kind(x.Elem()))
+	case *types.Tuple:
+		r := kindNone
+		for i := 0; i < x.Len(); i++ {
+			r = max(r, k.kind(x.At(i).Type()))
+		}
+		return r
+	case *types.Named:
+		if o := x.Obj(); o.Pkg() != nil && o.Pkg().Path() == "syscall" {
+			switch o.Name() {
+			case "SysProcAttr":
+				return kindAttr
+			case "Credential":
+				return kindOther
+			}
+		}
+		return k.kind(x.Underlying())
+	case *types.Struct:
+		if k.attr != nil && types.Identical(x, k.attr) || k.cred != nil && types.Identical(x, k.cred) {
+			return kindOther
+		}
+	}
+	return kindNone
+}
+
+// ctorAllowed reports whether f is written inside one of the functions allowed
+// to build a SysProcAttr.
+func ctorAllowed(f *ssa.Function, ctors []string) bool {
+	return nameAllowed(qname(topOf(f)), ctors)
+}
+
+// nameAllowed matches a function's name against the allowed constructors: an
+// exact name, or, for an entry ending in a dot, any function of that package.
+func nameAllowed(top string, ctors []string) bool {
+	for _, c := range ctors {
+		if top == c || strings.HasSuffix(c, ".") && strings.HasPrefix(top, c) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkAttr refuses every reference to syscall.SysProcAttr or syscall.Credential
+// (an alias, a defined type of the same struct, a conversion, a literal, a
+// field, a variable holding one) in reached code outside the standard library,
+// except in the allowed constructor, where only the fields of AllowedAttr may
+// be set and the value must be a plain composite literal. Following each write
+// would always miss one; refusing the type leaves none.
+func (a *analysis) checkAttr() {
+	ok := Set(AllowedAttr)
+	ctors := a.o.AttrConstructors
+	if ctors == nil {
+		ctors = []string{spawnStart}
+	}
+	k := a.attrTypes()
 	for _, f := range a.order {
-		if f.Pkg == nil || stdlibPath(f.Pkg.Pkg.Path()) {
+		p := pkgOf(f)
+		if p == nil || a.std[p.Pkg.Path()] {
 			continue
+		}
+		allowed := ctorAllowed(f, ctors)
+		field := func(in ssa.Instruction, x ssa.Value, idx int) {
+			t := types.Unalias(x.Type())
+			if p, isPtr := t.Underlying().(*types.Pointer); isPtr {
+				t = types.Unalias(p.Elem())
+			}
+			if n, isNamed := t.(*types.Named); isNamed && k.kind(n) == kindAttr {
+				if name := n.Underlying().(*types.Struct).Field(idx).Name(); !ok[name] {
+					a.fail("SysProcAttr field %s set at %s", name, a.pos(in.Pos()))
+				}
+			}
 		}
 		for _, b := range f.Blocks {
 			for _, in := range b.Instrs {
+				worst := kindNone
+				if v, isVal := in.(ssa.Value); isVal {
+					worst = k.kind(v.Type())
+				}
+				for _, op := range in.Operands(nil) {
+					if *op != nil {
+						worst = max(worst, k.kind((*op).Type()))
+					}
+				}
+				switch {
+				case worst == kindOther:
+					a.fail("syscall.Credential, or a type of the layout of it or of SysProcAttr, is used in %s at %s", f, a.pos(in.Pos()))
+				case worst == kindAttr && !allowed:
+					a.fail("syscall.SysProcAttr is used in %s at %s, outside the one function that may build it", f, a.pos(in.Pos()))
+				}
+				if !allowed {
+					continue
+				}
 				switch in := in.(type) {
 				case *ssa.FieldAddr:
 					field(in, in.X, in.Field)
 				case *ssa.Field:
 					field(in, in.X, in.Field)
 				case *ssa.Alloc:
-					if !isSysProcAttr(in.Type()) {
+					pt, isPtr := in.Type().(*types.Pointer)
+					if !isPtr || k.kind(pt.Elem()) != kindAttr {
 						continue
 					}
 					for _, r := range *in.Referrers() {
@@ -481,41 +638,33 @@ func (a *analysis) checkAttr() {
 	}
 }
 
-func isSysProcAttrStruct(t types.Type) bool {
-	n, ok := t.(*types.Named)
-	return ok && n.Obj().Pkg() != nil && n.Obj().Pkg().Path() == "syscall" && n.Obj().Name() == "SysProcAttr"
-}
-
-func isSysProcAttr(t types.Type) bool {
-	p, ok := t.(*types.Pointer)
-	if !ok {
-		return false
-	}
-	n, ok := p.Elem().(*types.Named)
-	return ok && n.Obj().Pkg() != nil && n.Obj().Pkg().Path() == "syscall" && n.Obj().Name() == "SysProcAttr"
-}
-
-// checkImports refuses cgo and unsafe in svd's own packages.
+// checkImports refuses, in every package outside the standard library, cgo,
+// unsafe and reflect, and assembly files, unless listed: none of them leaves a
+// call or a field write for the other checks to see.
 func (a *analysis) checkImports(pkgs []*packages.Package) {
 	packages.Visit(pkgs, nil, func(p *packages.Package) {
-		if a.module == "" || !strings.HasPrefix(p.PkgPath, a.module+"/") {
+		if p.Module == nil {
 			return
 		}
-		// assembly can issue any system call with no Go call to see
 		for _, o := range p.OtherFiles {
 			switch strings.ToLower(filepath.Ext(o)) {
 			case ".s", ".syso":
-				a.fail("%s holds the non-Go file %s", p.PkgPath, filepath.Base(o))
+				if !asmAllowed[p.PkgPath+" "+filepath.Base(o)] {
+					a.fail("%s holds the non-Go file %s", p.PkgPath, filepath.Base(o))
+				}
 			}
 		}
+		refused := func(path string) bool {
+			return (path == "unsafe" || path == "C" || path == "reflect") && !importAllowed[p.PkgPath+" "+path]
+		}
 		for path := range p.Imports {
-			if path == "unsafe" || path == "C" {
+			if refused(path) {
 				a.fail("%s imports %s", p.PkgPath, path)
 			}
 		}
 		for _, s := range p.Syntax {
 			for _, im := range s.Imports {
-				if im.Path.Value == `"C"` || im.Path.Value == `"unsafe"` {
+				if path := strings.Trim(im.Path.Value, `"`); refused(path) {
 					a.fail("%s imports %s", p.PkgPath, im.Path.Value)
 				}
 			}

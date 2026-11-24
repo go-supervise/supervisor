@@ -245,4 +245,26 @@ func TestMonitorSyscallSurfaceCatches(t *testing.T) {
 	t.Run("canary_rawnr", func(t *testing.T) {
 		source1(t, "canary_rawnr", "source: non-constant system-call number at ", " (in github.com/go-supervise/supervisor/internal/monitor.canary)")
 	})
+
+	// A forbidden call in a child process, which inherits the filter and dies
+	// alone: cloned as a fork (exit signal SIGCHLD) and cloned with another exit
+	// signal and without CLONE_VFORK, which the tracer books in the leader's group.
+	for _, tag := range []string{"canary_forkchild", "canary_forkclone"} {
+		t.Run(tag, func(t *testing.T) {
+			privileged(t)
+			o := surfaceTools(t, t.TempDir(), tag)
+			res, err := RunScenario(o, Scenarios()[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			const want = "dynamic: a descendant process (pid "
+			found := false
+			for _, f := range res.Failures {
+				found = found || (strings.HasPrefix(f, want) && strings.Contains(f, `at system call "kill"`))
+			}
+			if !found {
+				t.Fatalf("dynamic failures %q, want one starting %q naming kill", res.Failures, want)
+			}
+		})
+	}
 }

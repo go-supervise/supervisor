@@ -117,7 +117,11 @@ func Judge(arch string, r *Recording, wantExit int) []string {
 	// a refused call in a descendant (the fork child, which inherits the
 	// filter) kills only that process, and its parent sees no failure at all
 	for _, d := range r.Sigsys {
-		if d.Group == r.Leader {
+		// a thread of the leader's own process dies with the leader, whose
+		// status is judged above; with the leader alive, the death is of a
+		// process the recorder booked in the leader's group (a clone made with
+		// another exit signal and without CLONE_VFORK) and must be reported
+		if d.Group == r.Leader && r.Signal == sigSYS {
 			continue
 		}
 		if d.HasCall {
