@@ -60,7 +60,7 @@ var (
 	ErrGrant           = errors.New("fsm: target outside the principal's grant")
 	ErrLeaked          = errors.New("fsm: the service is leaked")
 	ErrPrincipalBudget = errors.New("fsm: the principal's budget is spent")
-	ErrTxBusy          = errors.New("fsm: a transaction of this principal is pending")
+	ErrStillWanted     = errors.New("fsm: the service is still wanted")
 	ErrUnreachable     = errors.New("fsm: the cell is unreachable")
 	ErrInput           = errors.New("fsm: malformed input")
 	ErrTime            = errors.New("fsm: time went backwards")
@@ -103,6 +103,9 @@ func NewPlan(p Plan) (*Plan, error) {
 				}
 			}
 		}
+	}
+	if err := p.checkGrid(); err != nil {
+		return nil, err
 	}
 	if err := p.checkAcyclic(); err != nil {
 		return nil, err
@@ -182,6 +185,39 @@ func (p *Plan) checkClosed() error {
 // cut is cut(A, B): A in grant(p) and B not (section 2.3).
 func (p *Plan) cut(a, b int) bool { return p.Svc[a].Grant && !p.Svc[b].Grant }
 
+// checkGrid refuses a grid whose Reach is not one of the values, whose present
+// cell has a Prio outside 1..NumGuards, or whose row repeats a Prio: such a row
+// would silently drop a guard from p.order.
+func (p *Plan) checkGrid() error {
+	for s := range p.Tables.Grid {
+		var seen [NumGuards + 1]bool
+		for g := Guard(0); g < NumGuards; g++ {
+			c := p.Tables.Grid[s][g]
+			if c.Reach == ReachInvalid || c.Reach > Absent {
+				return fmt.Errorf("%w: grid cell %v x guard %d has Reach %v", ErrPlan, State(s), g, c.Reach)
+			}
+			if c.Reach == Absent {
+				continue
+			}
+			if c.Prio < 1 || int(c.Prio) > NumGuards {
+				return fmt.Errorf("%w: grid cell %v x guard %d has Prio %d", ErrPlan, State(s), g, c.Prio)
+			}
+			if seen[c.Prio] {
+				return fmt.Errorf("%w: row %v repeats Prio %d", ErrPlan, State(s), c.Prio)
+			}
+			seen[c.Prio] = true
+		}
+	}
+	for s := range p.Tables.Event {
+		for e := range p.Tables.Event[s] {
+			if r := p.Tables.Event[s][e].Reach; r == ReachInvalid || r > Absent {
+				return fmt.Errorf("%w: event cell %v x %d has Reach %v", ErrPlan, State(s), e, r)
+			}
+		}
+	}
+	return nil
+}
+
 func (p *Plan) build() {
 	n := len(p.Svc)
 	p.freeReq = make([][]int, n)
@@ -213,13 +249,30 @@ type TxOut uint8
 
 // The outcomes.
 const (
-	TxNone    TxOut = iota
-	TxOK            // every service of T is Ready or Done
-	TxFailed        // a member failed or the deadline passed; rolled back unless no-rollback
-	TxAborted       // the instance began quiescing
+	TxNone       TxOut = iota
+	TxOK               // every service of T is Ready or Done
+	TxFailed           // a member failed or the deadline passed; rolled back unless no-rollback
+	TxAborted          // the instance began quiescing
+	TxSuperseded       // a stop cleared its holder; no rollback (section 2.3, N12)
 )
 
-// Tx is the transaction of one principal (section 2.4): one at a time.
+// StillWantedError is ErrStillWanted with D(X) (section 2.3, N12): By is the
+// services that keep a target up, filtered to the caller's grant for the
+// delegate, and Others counts the ones the caller may not name.
+type StillWantedError struct {
+	By     uint32
+	Others int
+}
+
+func (e *StillWantedError) Error() string {
+	return fmt.Sprintf("%v: by %b, others %d", ErrStillWanted, e.By, e.Others)
+}
+
+// Is makes errors.Is(err, ErrStillWanted) hold.
+func (e *StillWantedError) Is(target error) bool { return target == ErrStillWanted }
+
+// Tx is the transaction of one holder h(q, X) (section 2.4): at most one open
+// per holder. It is stored at index By*len(Svc)+X.
 type Tx struct {
 	Active     bool
 	Out        TxOut
@@ -255,12 +308,15 @@ type World struct {
 	Now    int64
 	RInst  []int64
 	RP     []int64
-	Tx     [3]Tx // by slot: owner on O, the delegate, owner on a grant
+	Tx     []Tx // per holder: index By*len(Svc)+X (see Plan.TxIndex)
 }
+
+// TxIndex is the slot of the transaction of holder h(by, x).
+func (p *Plan) TxIndex(by Principal, x int) int { return int(by)*len(p.Svc) + x }
 
 // NewWorld is the initial world: every service Inactive, no holder.
 func (p *Plan) NewWorld() *World {
-	return &World{Svc: make([]SvcState, len(p.Svc))}
+	return &World{Svc: make([]SvcState, len(p.Svc)), Tx: make([]Tx, 2*len(p.Svc))}
 }
 
 // Clone returns a deep copy.
@@ -273,6 +329,7 @@ func (w *World) Clone() *World {
 	}
 	c.RInst = append([]int64(nil), w.RInst...)
 	c.RP = append([]int64(nil), w.RP...)
+	c.Tx = append([]Tx(nil), w.Tx...)
 	return &c
 }
 

@@ -1,6 +1,7 @@
 package fsm
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -39,9 +40,9 @@ func highInput(p *Plan, tok Tok) (high, exempt bool) {
 		}
 		return false, uint32(tok.A)&(1<<n-1)&gmask != 0
 	case kDeadline:
-		// the delegate's slot is p's; the owner's slot on a grant is G's
-		// too, and its outcome is outside obs_O
-		return tok.B%3 == byte(Delegate), tok.B%3 == OwnerInGrant
+		// the delegate's holders are p's; the owner's holder on a service of
+		// a grant has its outcome in G, outside obs_O
+		return Principal(tok.B&1) == Delegate, Principal(tok.B&1) == Owner && grant(int(tok.A)%n)
 	}
 	return false, false
 }
@@ -60,7 +61,12 @@ func obsO(p *Plan, w *World) string {
 		fmt.Fprintf(&b, "%d:%d.%t.%d.%d.%t.%t.%d.%d.%t.%t.%t.%d|", i, s.S, goal&(1<<i) != 0, s.Cause, s.Exit, s.Wexp, s.Armed, s.Reason, p.RCount(w, i), s.Tree, s.MainUp, s.Spawning, s.Live)
 	}
 	fmt.Fprintf(&b, "m%d.%d|inst%d", w.Mode, w.Status, p.InstCount(w))
-	fmt.Fprintf(&b, "|tx%t.%d", w.Tx[Owner].Active, w.Tx[Owner].Out)
+	for i := range w.Svc {
+		if !p.Svc[i].Grant {
+			t := w.Tx[p.TxIndex(Owner, i)]
+			fmt.Fprintf(&b, "|tx%d.%t.%d", i, t.Active, t.Out)
+		}
+	}
 	return b.String()
 }
 
@@ -77,6 +83,15 @@ const gate1Nodes = 3000
 
 // gate1 explores the pairs of worlds and returns the first red pair, "" when
 // every pair reached is green, and whether the search was exhaustive.
+// errClass is the sentinel an error stands for: two copies refuse alike when
+// both refuse for the same reason, whatever the counts in the message.
+func errClass(e error) error {
+	if errors.Is(e, ErrStillWanted) {
+		return ErrStillWanted
+	}
+	return e
+}
+
 func gate1(t testing.TB, p *Plan, init *World, maxNodes int) (red string, exhaustive bool) {
 	t.Helper()
 	toks := allTokens(p)
@@ -111,7 +126,7 @@ func gate1(t testing.TB, p *Plan, init *World, maxNodes int) (red string, exhaus
 			w2, r2, e2 := p.Step(cur.b, in2)
 			if !high {
 				if !exempt {
-					if e1 != e2 {
+					if errClass(e1) != errClass(e2) {
 						return fmt.Sprintf("low %+v enabled in one copy only: %v / %v, from %s", tok, e1, e2, key(cur.a)), exhaustive
 					}
 					if e1 == nil && r1.Stale != r2.Stale {

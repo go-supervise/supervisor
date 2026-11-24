@@ -2,6 +2,7 @@ package fsm
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -31,8 +32,13 @@ func TestInputsOutsideThePlanAreRefused(t *testing.T) {
 	for _, ev := range []Event{Ry, Rs, NumEvents} {
 		refuses(t, p, w, Input{Kind: InEvent, Svc: 0, Event: ev}, ErrInput)
 	}
-	refuses(t, p, w, Input{Kind: InDeadline, Slot: 3}, ErrInput)
-	refuses(t, p, w, Input{Kind: InDeadline, Slot: -1}, ErrInput)
+	refuses(t, p, w, Input{Kind: InDeadline, Svc: 3}, ErrInput)
+	refuses(t, p, w, Input{Kind: InDeadline, Svc: -1}, ErrInput)
+	refuses(t, p, w, Input{Kind: InDeadline, By: 2}, ErrInput)
+	refuses(t, p, &World{}, Input{Kind: InTick}, ErrInput)
+	short := p.NewWorld()
+	short.Tx = short.Tx[:3]
+	refuses(t, p, short, Input{Kind: InTick}, ErrInput)
 	refuses(t, p, w, Input{Kind: InKind(0)}, ErrInput)
 	refuses(t, p, w, Input{Kind: InDeadline + 1}, ErrInput)
 }
@@ -59,24 +65,44 @@ func TestDelegatedStartPaysTheBudget(t *testing.T) {
 	h := newH(t, p)
 	h.do(Input{Kind: InStart, By: Delegate, Targets: 2, Deadline: 1})
 	h.do(Input{Kind: InTick, Now: 1})
-	h.do(Input{Kind: InDeadline, Slot: int(Delegate), Now: 1})
+	h.do(Input{Kind: InDeadline, By: Delegate, Svc: 1, Now: 1})
 	refuses(t, p, h.w, Input{Kind: InStart, By: Delegate, Targets: 2, Deadline: 5, Now: 1}, ErrPrincipalBudget)
 }
 
-// TestOwnerTransactionOnAGrantDoesNotBlockO is the finding of Gate 1 against
-// "one transaction per principal": an owner transaction on grant(p) ends when
-// p's service settles, so it must not decide whether the owner's next start
-// on O is accepted (section 2.4: one open transaction per holder).
-func TestOwnerTransactionOnAGrantDoesNotBlockO(t *testing.T) {
+// TestTransactionsArePerHolder is draft 16, section 2.3: the transaction is
+// indexed by the holder h(q, X). The same principal starting another service
+// is not refused, and a repeated start is not an error and opens nothing.
+func TestTransactionsArePerHolder(t *testing.T) {
 	p := mixedPlan(t)
 	h := newH(t, p)
 	h.start(Owner, 0b100) // S2 is in grant(p)
-	if !h.w.Tx[OwnerInGrant].Active || h.w.Tx[Owner].Active {
-		t.Fatalf("the grant transaction is in slot %d: %+v", OwnerInGrant, h.w.Tx)
+	if !h.w.Tx[p.TxIndex(Owner, 2)].Active {
+		t.Fatalf("no transaction at h(owner, 2): %+v", h.w.Tx)
 	}
 	h.start(Owner, 0b001)
-	refuses(t, p, h.w, Input{Kind: InStart, By: Owner, Targets: 0b100, Deadline: 20}, ErrTxBusy)
+	if !h.w.Tx[p.TxIndex(Owner, 0)].Active || !h.w.Tx[p.TxIndex(Owner, 2)].Active {
+		t.Fatalf("one transaction per holder, both open: %+v", h.w.Tx)
+	}
 	refuses(t, p, h.w, Input{Kind: InStart, By: Owner, Targets: 0b101, Deadline: 20}, ErrInput)
+	before := h.w.Clone()
+	w, _, err := p.Step(h.w, Input{Kind: InStart, By: Owner, Targets: 0b001, Deadline: 99})
+	if err != nil || !reflect.DeepEqual(w.Tx, before.Tx) {
+		t.Fatalf("a repeated start changed the transactions or failed: %v %+v", err, w.Tx)
+	}
+}
+
+// TestRepeatedStartOpensNoEmptyTransaction: an existing holder whose
+// transaction already ended must not open a new, empty one that succeeds at
+// once and writes an outcome nobody asked for.
+func TestRepeatedStartOpensNoEmptyTransaction(t *testing.T) {
+	p := newPlan(t, Plan{Svc: []SvcPlan{{Restart: Always}}})
+	h := newH(t, p)
+	h.start(Owner, 1)
+	h.w.Tx[0] = Tx{Out: TxFailed}
+	w, _, err := p.Step(h.w, Input{Kind: InStart, By: Owner, Targets: 1, Deadline: 5})
+	if err != nil || w.Tx[0] != (Tx{Out: TxFailed}) {
+		t.Fatalf("a repeated start by a holder reopened a transaction: %v %+v", err, w.Tx[0])
+	}
 }
 
 // Regression: REVIEW-4 E1 (the goal across the cut) and REVIEW-5 F3 route 1.

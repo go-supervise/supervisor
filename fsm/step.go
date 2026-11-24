@@ -1,5 +1,7 @@
 package fsm
 
+import "math/bits"
+
 // InKind is the kind of an Input.
 type InKind uint8
 
@@ -14,7 +16,7 @@ const (
 	InStop                       // Targets, By
 	InTerm                       // SIGTERM: Quiescing(0)
 	InTick                       // time passes
-	InDeadline                   // Slot: the request deadline of that transaction slot
+	InDeadline                   // By, Svc: the request deadline of holder h(By, Svc)
 )
 
 // Input is one step's input. Now is the time of the step and may not
@@ -28,10 +30,11 @@ type Input struct {
 	Gen        uint32
 	Perm       bool // the status pipe holds perm (X1 only)
 	By         Principal
-	Slot       int // InDeadline: Owner, Delegate or OwnerInGrant
 	Targets    uint32
 	Deadline   int64
 	NoRollback bool
+	// WithDependents is `stop --with-dependents` (section 2.3, N12).
+	WithDependents bool
 }
 
 // Result is what a step produced besides the new world.
@@ -45,6 +48,10 @@ type run struct {
 	p   *Plan
 	w   *World
 	res *Result
+	// escPending is an escalation raised inside a round: it is applied between
+	// rounds, never in the middle of one (section 2.3, draft 16).
+	escPending bool
+	escStatus  int
 }
 
 // ctx is who called, for the Retry cell's payment (F9).
@@ -56,14 +63,12 @@ type ctx struct {
 // Step applies one input to w and returns the new world; w is not modified.
 // On an error the world is not changed and the result is nil.
 func (p *Plan) Step(w *World, in Input) (*World, *Result, error) {
-	return p.step(w, in, p.sequence())
+	return p.step(w, in, p.sequence(), false)
 }
 
-// sequence is the evaluation order of a step: targets before their
-// dependents, ties by index. Section 3.5 says confluence across ALL orders is
-// asserted by the BFS; it does not hold (TestArbitraryOrderIsNotConfluent), so
-// the package fixes a order in which a dependent never reads a target's
-// transient state while the target still has a move to make.
+// sequence is the order of phase 1 of a round (section 3.5, draft 16): targets
+// before their dependents over require, want and order edges, ties by index.
+// Every such order gives the same world; an arbitrary order does not.
 func (p *Plan) sequence() []int {
 	n := len(p.Svc)
 	done := make([]bool, n)
@@ -89,7 +94,13 @@ func (p *Plan) sequence() []int {
 	return seq
 }
 
-func (p *Plan) step(w *World, in Input, order []int) (*World, *Result, error) {
+// step runs one input. order is the targets-first order of phase 1, and rev
+// reverses the order in which phase 2 signals its services (it must not
+// matter; the tests flip it).
+func (p *Plan) step(w *World, in Input, order []int, rev bool) (*World, *Result, error) {
+	if len(w.Svc) != len(p.Svc) || len(w.Tx) != 2*len(p.Svc) {
+		return nil, nil, ErrInput
+	}
 	if in.Now < w.Now {
 		return nil, nil, ErrTime
 	}
@@ -98,13 +109,21 @@ func (p *Plan) step(w *World, in Input, order []int) (*World, *Result, error) {
 	if err := r.input(in); err != nil {
 		return nil, nil, err
 	}
-	// Each pass ends at least one transaction, and there are two principals,
-	// so a third pass finds nothing to resolve.
+	// A step is rounds. A round runs to its fixpoint with the goals it started
+	// with; then the pending rollbacks and the escalation are applied and a new
+	// round starts, until a round ends with nothing pending. Each boundary
+	// consumes a transaction or the escalation.
 	for {
-		if err := r.converge(order); err != nil {
+		if err := r.round(order, rev); err != nil {
 			return nil, nil, err
 		}
-		if !r.resolveTx() {
+		again := r.resolveTx()
+		if r.escPending {
+			r.escalate(r.escStatus)
+			r.escPending, r.escStatus = false, 0
+			again = true
+		}
+		if !again {
 			break
 		}
 	}
@@ -253,90 +272,137 @@ func (r *run) start(in Input) error {
 	if g := r.grantMask(); in.Targets&g != 0 && in.Targets&^g != 0 {
 		return ErrInput
 	}
-	q := r.slot(in.By, in.Targets)
-	if r.w.Tx[q].Active {
-		return ErrTxBusy
+	// A start by q on X while h(q, X) is held adds nothing and opens no
+	// transaction (section 2.3, N4); it is never an error. A repeated
+	// --no-rollback marks the open transaction of the holder permanent.
+	var fresh uint32
+	for i := range r.w.Svc {
+		if in.Targets&(1<<i) == 0 {
+			continue
+		}
+		if !r.w.Svc[i].H[in.By] {
+			fresh |= 1 << i
+		} else if t := &r.w.Tx[r.p.TxIndex(in.By, i)]; t.Active && in.NoRollback {
+			t.NoRollback = true
+		}
+	}
+	if fresh == 0 {
+		return nil
 	}
 	if in.By == Delegate {
 		if err := r.apiCharge(); err != nil {
 			return err
 		}
 	}
-	before := r.p.Goals(r.w)
-	var members uint32
 	for i := range r.w.Svc {
-		if in.Targets&(1<<i) != 0 && !r.w.Svc[i].H[in.By] {
-			r.w.Svc[i].H[in.By] = true
-			members |= 1 << i
+		if fresh&(1<<i) == 0 {
+			continue
 		}
+		before := r.p.Goals(r.w)
+		r.w.Svc[i].H[in.By] = true
+		after := r.p.Goals(r.w)
+		r.w.Tx[r.p.TxIndex(in.By, i)] = Tx{Active: true, Members: 1 << i, T: after &^ before, Deadline: in.Deadline, NoRollback: in.NoRollback}
 	}
-	after := r.p.Goals(r.w)
-	r.w.Tx[q] = Tx{Active: true, Members: members, T: after &^ before, Deadline: in.Deadline, NoRollback: in.NoRollback}
 	return nil
 }
 
-// OwnerInGrant is the slot of the owner's transaction whose targets lie in a
-// grant. A transaction is pending per holder and partition (section 2.4,
-// "at most one open transaction per holder"): were the owner's transaction on
-// a grant to block the owner's next start on O, p's choices would decide
-// whether an owner operation on O is enabled, and Gate 1 is red on exactly
-// that.
-const OwnerInGrant = 2
-
-func (r *run) slot(by Principal, targets uint32) int {
-	if by == Owner && targets&r.grantMask() != 0 {
-		return OwnerInGrant
-	}
-	return int(by)
+// dependents is the set of services with an uncut require or want edge to a
+// member of set, and with goal up in goal: D(X) of section 2.3 (N12).
+func (p *Plan) dependents(set, goal uint32) uint32 {
+	var d uint32
+	p.edges(func(a, b int, k edgeKind) {
+		if k != edgeOrd && set&(1<<b) != 0 && goal&(1<<a) != 0 && !p.cut(a, b) {
+			d |= 1 << a
+		}
+	})
+	return d
 }
 
-func slotPrincipal(q int) Principal {
-	if q == int(Delegate) {
-		return Delegate
+// reverseClosure is set plus every service that reaches it through uncut
+// require and want edges.
+func (p *Plan) reverseClosure(set uint32) uint32 {
+	for {
+		more := set | p.dependents(set, ^uint32(0))
+		if more == set {
+			return set
+		}
+		set = more
 	}
-	return Owner
 }
 
+// stop is `stop X` of section 2.3 (N12): refused with ErrStillWanted while an
+// uncut require or want dependent keeps X up, unless --with-dependents; it
+// clears EVERY holder of the cleared services, and a transaction that held one
+// ends superseded, without rollback.
 func (r *run) stop(in Input) error {
 	if err := r.writable(in.By, in.Targets); err != nil {
 		return err
 	}
+	clear := in.Targets
+	if in.WithDependents {
+		clear = r.p.reverseClosure(in.Targets)
+	} else if d := r.p.dependents(in.Targets, r.goalsWithout(in.Targets)); d != 0 {
+		e := &StillWantedError{By: d}
+		if in.By == Delegate {
+			e.By, e.Others = d&r.grantMask(), bits.OnesCount32(d&^r.grantMask())
+		}
+		return e
+	}
 	if in.By == Delegate {
 		if err := r.apiCharge(); err != nil {
 			return err
 		}
 	}
 	for i := range r.w.Svc {
-		if in.Targets&(1<<i) != 0 {
-			r.w.Svc[i].H[in.By] = false
+		if clear&(1<<i) == 0 {
+			continue
+		}
+		r.w.Svc[i].H = [2]bool{}
+		for by := Owner; by <= Delegate; by++ {
+			if t := &r.w.Tx[r.p.TxIndex(by, i)]; t.Active {
+				t.Active, t.Out = false, TxSuperseded
+			}
 		}
 	}
 	return nil
 }
 
+// goalsWithout is the goal vector with the holders of set removed.
+func (r *run) goalsWithout(set uint32) uint32 {
+	w := r.w.Clone()
+	for i := range w.Svc {
+		if set&(1<<i) != 0 {
+			w.Svc[i].H = [2]bool{}
+		}
+	}
+	return r.p.Goals(w)
+}
+
 func (r *run) deadline(in Input) error {
-	if in.Slot < 0 || in.Slot >= len(r.w.Tx) {
+	if in.By > Delegate || in.Svc < 0 || in.Svc >= len(r.p.Svc) {
 		return ErrInput
 	}
-	if t := &r.w.Tx[in.Slot]; !t.Active || r.w.Now < t.Deadline {
+	q := r.p.TxIndex(in.By, in.Svc)
+	if t := &r.w.Tx[q]; !t.Active || r.w.Now < t.Deadline {
 		r.res.Stale = true
 		return nil
 	}
-	r.endTx(in.Slot, TxFailed)
+	r.endTx(q, TxFailed)
 	return nil
 }
 
-// endTx ends the transaction of slot q; it reports whether a rollback removed
-// holders.
+// endTx ends the transaction at index q; it reports whether a rollback
+// removed holders.
 func (r *run) endTx(q int, out TxOut) bool {
 	t := &r.w.Tx[q]
 	t.Active, t.Out = false, out
 	if out != TxFailed || t.NoRollback {
 		return false
 	}
+	by := Principal(q / len(r.p.Svc))
 	for i := range r.w.Svc {
 		if t.Members&(1<<i) != 0 {
-			r.w.Svc[i].H[slotPrincipal(q)] = false
+			r.w.Svc[i].H[by] = false
 		}
 	}
 	return t.Members != 0
@@ -355,7 +421,9 @@ func (r *run) resolveTx() bool {
 		failed := false
 		for i, s := range r.w.Svc {
 			if t.T&(1<<i) != 0 {
-				failed = failed || s.S == Failed
+				// Leaked fails the transaction as Failed does (draft 16,
+				// section 2.4): it is stable and never Ready.
+				failed = failed || s.S == Failed || s.S == Leaked
 				allUp = allUp && isRD(s.S)
 			}
 		}
@@ -367,6 +435,15 @@ func (r *run) resolveTx() bool {
 		}
 	}
 	return rolled
+}
+
+// raiseEscalation records an escalation raised inside a round; it is applied
+// between rounds (step).
+func (r *run) raiseEscalation(status int) {
+	r.escPending = true
+	if status > r.escStatus {
+		r.escStatus = status
+	}
 }
 
 // escalate is mode := Quiescing(max(status, current)): holders are cleared
@@ -532,7 +609,7 @@ func (r *run) enter(i int, to State, reason Reason, delay int64) {
 		r.res.Effects = append(r.res.Effects, Effect{Kind: EfArm, Svc: i, Epoch: sv.Epoch, Gen: sv.Gen, Timer: st.Timer, Delay: delay})
 	}
 	if to == Failed && r.p.Svc[i].Terminal {
-		r.escalate(1)
+		r.raiseEscalation(1)
 	}
 }
 
@@ -567,7 +644,7 @@ func (r *run) charge(i int) bool {
 		oP = count(w.RInst, w.Now, p.Window) > p.MaxInst
 	}
 	if oP && !delegated {
-		r.escalate(1)
+		r.raiseEscalation(1)
 	}
 	return oA || (oP && delegated)
 }
@@ -591,7 +668,7 @@ func (r *run) payRetry(i int, x ctx) {
 	default:
 		w.RInst = appendWindow(w.RInst, w.Now, p.Window)
 		if count(w.RInst, w.Now, p.Window) > p.MaxInst {
-			r.escalate(1)
+			r.raiseEscalation(1)
 		}
 	}
 }
@@ -613,21 +690,33 @@ func (r *run) backoffDelay(i int) int64 {
 // below it (see testdata/moves.golden); only a defective grid reaches it.
 func (p *Plan) moveCap() int { return 32 * len(p.Svc) * len(p.Svc) }
 
-// converge applies guards until none is enabled (level-triggered propagation,
-// section 3.5), sweeping the services in the given order.
-func (r *run) converge(order []int) error {
-	for moved := true; moved; {
-		moved = false
-		for _, i := range order {
-			// Stabilise one service before the next, as the termination
-			// argument of section 3.5 does (sinks first).
-			for r.fire(i) {
-				moved = true
-				if len(r.res.Moves) > r.p.moveCap() {
-					return ErrNoFixpoint
-				}
+// round is one round of propagation (section 3.5, draft 16), in two phases.
+// Phase 1 fires every guard except G_free, service by service in a
+// targets-first order, each stabilised before the next: one pass reaches the
+// fixpoint. Phase 2 fires G_free once, for the services of StopWait whose
+// G_free holds in the world phase 1 ended in; it is order independent.
+func (r *run) round(order []int, rev bool) error {
+	for _, i := range order {
+		for r.fire(i, false) {
+			if len(r.res.Moves) > r.p.moveCap() {
+				return ErrNoFixpoint
 			}
 		}
+	}
+	goal := r.p.Goals(r.w)
+	var f []int
+	for i := range r.w.Svc {
+		if _, _, ok := r.next(i, goal, true); ok {
+			f = append(f, i)
+		}
+	}
+	if rev {
+		for a, b := 0, len(f)-1; a < b; a, b = a+1, b-1 {
+			f[a], f[b] = f[b], f[a]
+		}
+	}
+	for _, i := range f {
+		r.fire(i, true)
 	}
 	return nil
 }
@@ -643,21 +732,33 @@ func (r *run) signature(i int, goal uint32) uint8 {
 	return s
 }
 
-// fire tries the guards of service i's row in Prio order and applies the
-// first enabled one.
-func (r *run) fire(i int) bool {
-	goal := r.p.Goals(r.w)
+// next is the first enabled guard of service i's row, in Prio order, among
+// G_free alone (free) or every other guard (not free).
+func (r *run) next(i int, goal uint32, free bool) (Guard, *Cell, bool) {
 	sv := &r.w.Svc[i]
 	for _, g := range r.p.order[sv.S] {
 		c := &r.p.Tables.Grid[sv.S][g]
-		if !r.p.Guard(r.w, goal, i, g) || (c.Cond != 0 && !r.cond(i, c.Cond)) {
+		if (g == GFree) != free {
 			continue
 		}
-		rec := MoveRec{Svc: i, From: sv.S, Guard: g, Sig: r.signature(i, goal)}
-		r.apply(i, c.Then, ctx{})
-		rec.To = sv.S
-		r.res.Moves = append(r.res.Moves, rec)
-		return true
+		if r.p.Guard(r.w, goal, i, g) && (c.Cond == 0 || r.cond(i, c.Cond)) {
+			return g, c, true
+		}
 	}
-	return false
+	return 0, nil, false
+}
+
+// fire applies the first enabled guard of service i (see next).
+func (r *run) fire(i int, free bool) bool {
+	goal := r.p.Goals(r.w)
+	sv := &r.w.Svc[i]
+	g, c, ok := r.next(i, goal, free)
+	if !ok {
+		return false
+	}
+	rec := MoveRec{Svc: i, From: sv.S, Guard: g, Sig: r.signature(i, goal)}
+	r.apply(i, c.Then, ctx{})
+	rec.To = sv.S
+	r.res.Moves = append(r.res.Moves, rec)
+	return true
 }

@@ -154,7 +154,7 @@ func checkInvariants(t testing.TB, p *Plan, w *World) {
 	}
 	r := &run{p: p, w: w.Clone(), res: &Result{}}
 	for i := range w.Svc {
-		if r.fire(i) {
+		if r.fire(i, false) || r.fire(i, true) {
 			t.Fatalf("propagation is not at a fixpoint: service %d can still move in %s", i, key(w))
 		}
 	}

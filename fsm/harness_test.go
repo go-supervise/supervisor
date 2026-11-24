@@ -61,12 +61,13 @@ func decode(p *Plan, w *World, t Tok) Input {
 		in.Deadline = w.Now + 1 + int64(t.C&3)
 	case kStop:
 		in.Kind, in.Targets, in.By = InStop, uint32(t.A)&(1<<n-1), Principal(t.B&1)
+		in.WithDependents = t.B&2 != 0
 	case kTerm:
 		in.Kind = InTerm
 	case kTick:
 		in.Kind, in.Now = InTick, w.Now+1+int64(t.C&1)
 	case kDeadline:
-		in.Kind, in.Slot = InDeadline, int(t.B)%3
+		in.Kind, in.Svc, in.By = InDeadline, int(t.A)%n, Principal(t.B&1)
 	}
 	return in
 }
@@ -103,10 +104,11 @@ func allTokens(p *Plan) []Tok {
 			}
 		}
 		for by := byte(0); by < 2; by++ {
-			toks = append(toks, Tok{kRetry, i, by, 0}, Tok{kRestart, i, by, 0}, Tok{kStart, 1 << i, by, 0}, Tok{kStop, 1 << i, by, 0})
+			toks = append(toks, Tok{kRetry, i, by, 0}, Tok{kRestart, i, by, 0}, Tok{kStart, 1 << i, by, 0}, Tok{kStop, 1 << i, by, 0},
+				Tok{kStop, 1 << i, by | 2, 0}, Tok{kDeadline, i, by, 0})
 		}
 	}
-	toks = append(toks, Tok{kTerm, 0, 0, 0}, Tok{kTick, 0, 0, 0}, Tok{kDeadline, 0, 0, 0}, Tok{kDeadline, 0, 1, 0}, Tok{kDeadline, 0, 2, 0})
+	toks = append(toks, Tok{kTerm, 0, 0, 0}, Tok{kTick, 0, 0, 0})
 	return toks
 }
 

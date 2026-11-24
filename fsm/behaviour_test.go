@@ -239,17 +239,17 @@ func TestAPIRefusalsInOrder(t *testing.T) {
 	h.fail(Input{Kind: InRetry, By: Owner, Svc: -1}, ErrInput)
 	h.fail(Input{Kind: InRestart, By: Owner, Svc: 2}, ErrInput)
 	h.fail(Input{Kind: 0}, ErrInput)
-	h.fail(Input{Kind: InDeadline, Slot: 3}, ErrInput)
-	h.fail(Input{Kind: InDeadline, Slot: -1}, ErrInput)
+	h.fail(Input{Kind: InDeadline, Svc: 3}, ErrInput)
+	h.fail(Input{Kind: InDeadline, Svc: -1}, ErrInput)
 	h.fail(Input{Kind: InStart, By: Delegate, Targets: 1}, ErrGrant)
 	h.fail(Input{Kind: InStop, By: Delegate, Targets: 3}, ErrGrant)
 	h.fail(Input{Kind: InRetry, By: Delegate, Svc: 0}, ErrGrant)
 	h.fail(Input{Kind: InRestart, By: Delegate, Svc: 0}, ErrGrant)
 	h.fail(Input{Kind: InStart, Now: -1, By: Owner, Targets: 1}, ErrTime)
 
-	// A transaction in flight beats the budget: the busy check comes first.
+	// A repeated start is not an error and is not charged (draft 16).
 	h.start(Delegate, 2)
-	h.fail(Input{Kind: InStart, By: Delegate, Targets: 2}, ErrTxBusy)
+	h.do(Input{Kind: InStart, By: Delegate, Targets: 2})
 	// The budget refuses a stop before it takes effect, and the world is intact.
 	before := h.w.Clone()
 	h.fail(Input{Kind: InStop, By: Delegate, Targets: 2}, ErrPrincipalBudget)
@@ -275,19 +275,50 @@ func TestAPIRefusalsInOrder(t *testing.T) {
 	h.fail(Input{Kind: InRetry, Now: now, By: 2, Svc: 9}, ErrQuiescing)
 }
 
-// Regression: REVIEW-4 E1 and E2 (holders and the cut; p cannot remove the
-// holders of other principals outside G).
-func TestStopClearsOnlyTheCallersHolder(t *testing.T) {
+// Draft 16 section 2.3: stop clears every holder of the stopped service and
+// supersedes the transactions on those holders.
+func TestStopClearsEveryHolderAndSupersedes(t *testing.T) {
 	p := newPlan(t, Plan{Svc: []SvcPlan{{Restart: Always, Grant: true}}})
 	h := newH(t, p)
 	h.start(Owner, 1)
 	h.start(Delegate, 1)
-	h.do(Input{Kind: InStop, By: Owner, Targets: 1})
-	if h.w.Svc[0].H != [2]bool{false, true} || h.state(0) != Starting {
-		t.Fatalf("the delegate's holder must stay: %+v", h.w.Svc[0])
+	// The delegate's start adds no state to the target: its holder is set,
+	// and its transaction is already settled.
+	if !h.w.Tx[p.TxIndex(Owner, 0)].Active || h.w.Tx[p.TxIndex(Delegate, 0)].Active || !h.w.Svc[0].H[Delegate] {
+		t.Fatalf("owner open, delegate settled: %+v", h.w.Tx)
 	}
-	h.do(Input{Kind: InStop, By: Delegate, Targets: 1})
-	h.want(0, Stopping) // StopWait, then G_free in the same step
+	h.do(Input{Kind: InStop, By: Owner, Targets: 1})
+	if h.w.Svc[0].H != [2]bool{} {
+		t.Fatalf("every holder must go: %+v", h.w.Svc[0])
+	}
+	if tx := h.w.Tx[p.TxIndex(Owner, 0)]; tx.Active || tx.Out != TxSuperseded {
+		t.Fatalf("a stop supersedes the open transaction: %+v", h.w.Tx)
+	}
+	h.want(0, Stopping)
+}
+
+// A service another holder still wants cannot be stopped without
+// WithDependents; with it, the reverse closure goes.
+func TestStopRefusedWhileWanted(t *testing.T) {
+	p := newPlan(t, Plan{Svc: []SvcPlan{
+		{Restart: Always},
+		{Restart: Always, Req: []int{0}},
+	}})
+	h := newH(t, p)
+	h.start(Owner, 2)
+	h.ready(0)
+	before := h.w.Clone()
+	_, _, err := p.Step(h.w, Input{Kind: InStop, Now: h.w.Now, By: Owner, Targets: 1})
+	var sw *StillWantedError
+	if !errors.Is(err, ErrStillWanted) || !errors.As(err, &sw) || sw.Others != 0 {
+		t.Fatalf("want ErrStillWanted, got %v", err)
+	}
+	if !sameWorld(before, h.w) {
+		t.Fatal("a refused stop must not change the world")
+	}
+	h.do(Input{Kind: InStop, Now: h.w.Now, By: Owner, Targets: 1, WithDependents: true})
+	h.want(0, StopWait) // waits for its dependent
+	h.want(1, Stopping)
 }
 
 func TestRestartAndDone(t *testing.T) {
@@ -322,13 +353,13 @@ func TestTransactionSuccessFailureAbort(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		h := newH(t, plan())
 		h.start(Owner, 0b10)
-		if !h.w.Tx[Owner].Active || h.w.Tx[Owner].T != 0b11 || h.w.Tx[Owner].Members != 0b10 {
-			t.Fatalf("tx %+v", h.w.Tx[Owner])
+		if tx := h.w.Tx[1]; !tx.Active || tx.T != 0b11 || tx.Members != 0b10 {
+			t.Fatalf("tx %+v", tx)
 		}
 		h.ev(0, Ri)
 		h.want(1, Starting)
 		h.ev(1, Ri)
-		if tx := h.w.Tx[Owner]; tx.Active || tx.Out != TxOK {
+		if tx := h.w.Tx[1]; tx.Active || tx.Out != TxOK {
 			t.Fatalf("tx %+v", tx)
 		}
 	})
@@ -338,7 +369,7 @@ func TestTransactionSuccessFailureAbort(t *testing.T) {
 		h.ev(0, SEp)
 		h.want(0, Inactive)
 		h.want(1, Inactive)
-		if tx := h.w.Tx[Owner]; tx.Active || tx.Out != TxFailed || h.w.Svc[1].H[Owner] {
+		if tx := h.w.Tx[1]; tx.Active || tx.Out != TxFailed || h.w.Svc[1].H[Owner] {
 			t.Fatalf("tx %+v holder %v", tx, h.w.Svc[1].H)
 		}
 	})
@@ -346,7 +377,7 @@ func TestTransactionSuccessFailureAbort(t *testing.T) {
 		h := newH(t, plan())
 		h.do(Input{Kind: InStart, By: Owner, Targets: 0b10, Deadline: 9, NoRollback: true})
 		h.ev(0, SEp)
-		if tx := h.w.Tx[Owner]; tx.Out != TxFailed || !h.w.Svc[1].H[Owner] {
+		if tx := h.w.Tx[1]; tx.Out != TxFailed || !h.w.Svc[1].H[Owner] {
 			t.Fatalf("tx %+v holder %v", tx, h.w.Svc[1].H)
 		}
 		h.want(0, Failed)
@@ -355,10 +386,10 @@ func TestTransactionSuccessFailureAbort(t *testing.T) {
 	t.Run("deadline", func(t *testing.T) {
 		h := newH(t, plan())
 		h.do(Input{Kind: InStart, By: Owner, Targets: 0b10, Deadline: 10})
-		h.stale(Input{Kind: InDeadline, Now: 9, Slot: int(Owner)})
-		h.stale(Input{Kind: InDeadline, Now: 9, Slot: int(Delegate)})
-		h.do(Input{Kind: InDeadline, Now: 10, Slot: int(Owner)})
-		if tx := h.w.Tx[Owner]; tx.Active || tx.Out != TxFailed || h.w.Svc[1].H[Owner] {
+		h.stale(Input{Kind: InDeadline, Now: 9, By: Owner, Svc: 1})
+		h.stale(Input{Kind: InDeadline, Now: 9, By: Delegate, Svc: 1})
+		h.do(Input{Kind: InDeadline, Now: 10, By: Owner, Svc: 1})
+		if tx := h.w.Tx[1]; tx.Active || tx.Out != TxFailed || h.w.Svc[1].H[Owner] {
 			t.Fatalf("tx %+v", tx)
 		}
 		h.want(0, Stopping) // goal fell: stopwait(none) then G_free
@@ -367,7 +398,7 @@ func TestTransactionSuccessFailureAbort(t *testing.T) {
 		h := newH(t, plan())
 		h.start(Owner, 0b10)
 		r := h.do(Input{Kind: InTerm})
-		if tx := h.w.Tx[Owner]; tx.Active || tx.Out != TxAborted || h.w.Mode != Quiescing || h.w.Status != 0 || has(r, EfQuiesce) != 1 {
+		if tx := h.w.Tx[1]; tx.Active || tx.Out != TxAborted || h.w.Mode != Quiescing || h.w.Status != 0 || has(r, EfQuiesce) != 1 {
 			t.Fatalf("tx %+v mode %v status %d", tx, h.w.Mode, h.w.Status)
 		}
 		if r := h.do(Input{Kind: InTerm}); has(r, EfQuiesce) != 0 {
@@ -568,20 +599,56 @@ func TestArbitraryOrderIsNotConfluent(t *testing.T) {
 	disagree := 0
 	explore(t, p, p.NewWorld(), exploreOpts{maxNow: 1, maxNodes: 3000}, func(from *World, tok Tok, to *World, r *Result) {
 		in := decode(p, from, tok)
-		for _, o := range topo {
-			w, _, err := p.step(from, in, o)
-			if err != nil || key(w) != key(to) {
-				t.Fatalf("topological order %v disagrees with Step on %+v from %s", o, tok, key(from))
+		for _, rev := range []bool{false, true} {
+			for _, o := range topo {
+				w, _, err := p.step(from, in, o, rev)
+				if err != nil || key(w) != key(to) {
+					t.Fatalf("stratified order %v (rev %v) disagrees with Step on %+v from %s", o, rev, tok, key(from))
+				}
 			}
 		}
 		for _, o := range other {
-			if w, _, err := p.step(from, in, o); err != nil || key(w) != key(to) {
+			if w, _, err := p.step(from, in, o, false); err != nil || key(w) != key(to) {
 				disagree++
 			}
 		}
 	})
 	if disagree == 0 {
-		t.Fatal("every order agrees: section 3.5's confluence claim holds, drop the fixed order")
+		t.Fatal("every order agrees: the stratification is unnecessary, drop it")
+	}
+}
+
+// TestStratifiedPropagationKeepsAWantTargetWaiting is the repro of the review
+// of PR #5: B, and A with `order` (or `want`) on B, both Ready, and the owner
+// stops both. A's move to StopWait is visible to B's G_free in the same round,
+// so B stays in StopWait while A is signalled (section 3.5, draft 16). The
+// unstratified targets-first sweep of d74ceab signalled B in the same step.
+func TestStratifiedPropagationKeepsAWantTargetWaiting(t *testing.T) {
+	for _, edge := range []string{"ord", "want"} {
+		t.Run(edge, func(t *testing.T) {
+			a := SvcPlan{Restart: Always}
+			if edge == "ord" {
+				a.Ord = []int{0}
+			} else {
+				a.Want = []int{0}
+			}
+			p := newPlan(t, Plan{Svc: []SvcPlan{{Restart: Always}, a}})
+			h := newH(t, p)
+			h.start(Owner, 0b11)
+			h.ev(0, Ri)
+			h.ev(1, Ri)
+			h.want(0, Ready)
+			h.want(1, Ready)
+			for _, rev := range []bool{false, true} {
+				w, _, err := p.step(h.w, Input{Kind: InStop, By: Owner, Targets: 0b11}, p.sequence(), rev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if w.Svc[1].S != Stopping || w.Svc[0].S != StopWait {
+					t.Fatalf("rev %v: A %v B %v, want A Stopping and B StopWait", rev, w.Svc[1].S, w.Svc[0].S)
+				}
+			}
+		})
 	}
 }
 
@@ -598,20 +665,15 @@ func TestNoFixpointIsRefusedAtTheCap(t *testing.T) {
 		tb.Grid[Waiting][GOk].Then = Move{Target: Backoff, Actions: ARetryPay}
 		return tb
 	}
-	run := func(maxInst int) (*World, error) {
+	// Draft 16: an escalation raised inside a round is applied between
+	// rounds, so the overflow of R_inst no longer ends the lap inside the
+	// round: the loop runs to the cap for every MaxInst, and the world is
+	// refused, never half-applied.
+	for _, maxInst := range []int{1, 14, 15} {
 		p := newPlan(t, Plan{MaxInst: maxInst, Window: 100, Tables: loop(maxInst), Svc: []SvcPlan{{Restart: Always}}})
-		w, r, err := p.Step(p.NewWorld(), Input{Kind: InStart, By: Owner, Targets: 1, Deadline: 5})
-		if err == nil && len(r.Moves) != 2*maxInst+4 {
-			t.Fatalf("moves = %d, want %d", len(r.Moves), 2*maxInst+4)
+		if _, _, err := p.Step(p.NewWorld(), Input{Kind: InStart, By: Owner, Targets: 1, Deadline: 5}); !errors.Is(err, ErrNoFixpoint) {
+			t.Fatalf("MaxInst %d: a looping grid must be refused at the cap, got %v", maxInst, err)
 		}
-		return w, err
-	}
-	w, err := run(14)
-	if err != nil || w.Svc[0].S != Inactive || w.Mode != Quiescing {
-		t.Fatalf("32 moves are within the cap: %v %+v", err, w)
-	}
-	if _, err := run(15); !errors.Is(err, ErrNoFixpoint) {
-		t.Fatalf("34 moves must be refused, got %v", err)
 	}
 	for n, want := range map[int]int{1: 32, 2: 128, 3: 288, 32: 32768} {
 		p := &Plan{Svc: make([]SvcPlan, n)}

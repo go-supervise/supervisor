@@ -8,6 +8,8 @@
 // tables.go. The step function and the tests both read those values.
 package fsm
 
+import "fmt"
+
 // State is the lifecycle state of one service (section 3.2).
 type State uint8
 
@@ -36,6 +38,9 @@ var stateNames = [...]string{"Inactive", "Waiting", "Starting", "Ready", "Done",
 func (s State) String() string {
 	if s == Same {
 		return "Same"
+	}
+	if int(s) >= len(stateNames) {
+		return fmt.Sprintf("invalid(%d)", uint8(s))
 	}
 	return stateNames[s]
 }
@@ -199,7 +204,12 @@ const (
 
 var reachNames = [...]string{"INVALID", "live", "filter", "O2", "liveness", "absent"}
 
-func (r Reach) String() string { return reachNames[r] }
+func (r Reach) String() string {
+	if int(r) >= len(reachNames) {
+		return fmt.Sprintf("invalid(%d)", uint8(r))
+	}
+	return reachNames[r]
+}
 
 // Cond is a conjunction of predicates, as a bitset.
 type Cond uint16
