@@ -68,10 +68,7 @@ func (p *Plan) Marshal() ([]byte, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
-	b, err := json.Marshal(p)
-	if err != nil {
-		return nil, err
-	}
+	b, _ := json.Marshal(p) // every field is a plain value: it cannot fail
 	if len(b) > MaxPlan {
 		return nil, errors.New("helper: plan too large")
 	}

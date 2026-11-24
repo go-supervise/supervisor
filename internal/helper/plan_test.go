@@ -44,8 +44,17 @@ func TestPlanRefusals(t *testing.T) {
 	if _, err := ParsePlan([]byte("{")); err == nil {
 		t.Error("garbage accepted")
 	}
-	if _, err := ParsePlan([]byte(strings.Repeat(" ", MaxPlan+1))); err == nil {
+	good, _ := goodPlan().Marshal()
+	if _, err := ParsePlan(append(good, strings.Repeat(" ", MaxPlan)...)); err == nil {
 		t.Error("oversized plan accepted")
+	}
+	// A type error after the valid fields were read must still refuse.
+	if _, err := ParsePlan([]byte(`{"mode":"service","cwd":"/","stage_argv":["x"],"frame":5}`)); err == nil {
+		t.Error("ill-typed plan accepted")
+	}
+	// Well-formed JSON, invalid plan.
+	if _, err := ParsePlan([]byte(`{"mode":"x","cwd":"/","stage_argv":["x"]}`)); err == nil {
+		t.Error("invalid plan accepted")
 	}
 	if _, err := ParsePlan([]byte(`{"mode":"lane","cwd":"/","stage_argv":["x"]}`)); err != nil {
 		t.Errorf("lane plan refused: %v", err)
