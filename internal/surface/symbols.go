@@ -25,6 +25,12 @@ func SymbolAbsence(path string) (*Result, error) {
 	for _, s := range syms {
 		have[s.Name] = true
 	}
+	return absence(have)
+}
+
+// absence judges a symbol set: it must be a Go executable's, and hold none of
+// Absent.
+func absence(have map[string]bool) (*Result, error) {
 	if !have["main.main"] {
 		return nil, errors.New("surface: no main.main in the symbol table: not a Go executable, or stripped")
 	}

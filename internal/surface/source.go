@@ -83,27 +83,42 @@ func SourceHalf(o Options) (*Result, error) {
 	if len(o.Tags) > 0 {
 		flags = []string{"-tags=" + strings.Join(o.Tags, ",")}
 	}
-	pkgs, err := packages.Load(&packages.Config{Mode: packages.LoadAllSyntax | packages.NeedModule, Dir: o.Dir, Env: env, BuildFlags: flags}, o.Entry)
+	// x/sys/unix is loaded beside the entry, whether or not the entry imports
+	// it, because its SYS_* constants are the table of system-call names.
+	all, err := packages.Load(&packages.Config{Mode: packages.LoadAllSyntax | packages.NeedModule, Dir: o.Dir, Env: env, BuildFlags: flags}, o.Entry, unixPath)
 	if err != nil {
 		return nil, err
 	}
-	if len(pkgs) != 1 {
-		return nil, fmt.Errorf("surface: %s matched %d packages", o.Entry, len(pkgs))
-	}
 	bad := 0
-	packages.Visit(pkgs, nil, func(p *packages.Package) { bad += len(p.Errors) })
+	packages.Visit(all, nil, func(p *packages.Package) { bad += len(p.Errors) })
 	if bad > 0 {
 		return nil, fmt.Errorf("surface: %d package errors loading %s", bad, o.Entry)
 	}
+	var pkgs []*packages.Package
+	mainIdx := -1
+	for _, p := range all {
+		if p.PkgPath == unixPath {
+			pkgs = append(pkgs, p)
+			continue
+		}
+		if mainIdx >= 0 {
+			return nil, fmt.Errorf("surface: %s matched more than one package", o.Entry)
+		}
+		mainIdx = len(pkgs)
+		pkgs = append(pkgs, p)
+	}
+	if mainIdx < 0 {
+		return nil, fmt.Errorf("surface: %s matched no package", o.Entry)
+	}
 	prog, ssaPkgs := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
 	prog.Build()
-	mainPkg := ssaPkgs[0]
+	mainPkg := ssaPkgs[mainIdx]
 	roots := []*ssa.Function{mainPkg.Func("init"), mainPkg.Func("main")}
 	g := vta.CallGraph(ssautil.AllFunctions(prog), cha.CallGraph(prog))
 
-	a := &analysis{o: o, prog: prog, g: g, names: sysNames(prog), parent: map[*ssa.Function]*callgraph.Edge{}}
+	a := &analysis{o: o, prog: prog, g: g, names: sysNames(o.GOARCH), parent: map[*ssa.Function]*callgraph.Edge{}}
 	a.res.Chains = map[string][]string{}
-	a.module = modulePath(pkgs[0])
+	a.module = modulePath(pkgs[mainIdx])
 	a.reach(roots)
 	a.checkSites()
 	a.checkAttr()
@@ -143,30 +158,6 @@ func modulePath(p *packages.Package) string {
 		return p.Module.Path
 	}
 	return ""
-}
-
-// sysNames maps each SYS_ constant of x/sys/unix, for the analysed GOARCH, to
-// its lower-case name.
-func sysNames(prog *ssa.Program) map[int64]string {
-	m := map[int64]string{}
-	for _, p := range prog.AllPackages() {
-		if p.Pkg.Path() != unixPath {
-			continue
-		}
-		scope := p.Pkg.Scope()
-		for _, n := range scope.Names() {
-			c, ok := scope.Lookup(n).(*types.Const)
-			if !ok || !strings.HasPrefix(n, "SYS_") {
-				continue
-			}
-			if v, ok := constant.Int64Val(c.Val()); ok {
-				if _, dup := m[v]; !dup {
-					m[v] = strings.ToLower(n[len("SYS_"):])
-				}
-			}
-		}
-	}
-	return m
 }
 
 func (a *analysis) reach(roots []*ssa.Function) {

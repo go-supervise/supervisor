@@ -76,6 +76,40 @@ func RootCmd() *cobra.Command {
 	_ = sym.MarkFlagRequired("binary")
 	root.AddCommand(sym)
 
+	var snDir, snArch, snOut string
+	var snCheck bool
+	sn := &cobra.Command{
+		Use:   "sysnum",
+		Short: "regenerate (or --check) the committed system-call number table of an architecture",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			txt, err := surface.GenerateSysNum(snDir, snArch)
+			if err != nil {
+				return err
+			}
+			if snCheck {
+				have, err := os.ReadFile(snOut)
+				if err != nil {
+					return err
+				}
+				if string(have) != txt {
+					return fmt.Errorf("%s is out of date: run `syscallsurface sysnum --arch %s --out %s`", snOut, snArch, snOut)
+				}
+				return nil
+			}
+			if snOut == "" {
+				_, err = fmt.Fprint(cmd.OutOrStdout(), txt)
+				return err
+			}
+			return os.WriteFile(snOut, []byte(txt), 0o644)
+		},
+	}
+	sn.Flags().StringVar(&snDir, "dir", ".", "module root")
+	sn.Flags().StringVar(&snArch, "arch", runtime.GOARCH, "amd64 or arm64")
+	sn.Flags().StringVar(&snOut, "out", "", "file to write (default stdout); with --check, the file to compare")
+	sn.Flags().BoolVar(&snCheck, "check", false, "fail when --out differs from the regenerated table")
+	root.AddCommand(sn)
+
 	addPlatform(root)
 	return root
 }
