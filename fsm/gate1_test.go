@@ -191,7 +191,64 @@ func preloaded(p *Plan) *World {
 	return w
 }
 
-func TestGate1Green(t *testing.T) {
+// Measured on the abstraction (go1.27.4, arm64): ONE service in a grant with
+// MaxA 1, MaxInst 1, BudgetP 1 has exactly 25932 single-copy states, and the
+// pair search over them did not empty its frontier within 6,000,000 pairs. Two
+// services (req and want edges) reach 800000 single-copy states and were
+// still open. So the product is NOT searched exhaustively: it is searched
+// breadth first within gate1AbsStates and gate1AbsPairs, every divergence
+// reachable in the fewest steps first, and the count of states and pairs is
+// logged by each run. The closure of one copy is pinned below, since it is
+// the part that closes.
+const (
+	gate1AbsStates = 20000
+	gate1AbsPairs  = 300000
+)
+
+func absPlans(t testing.TB) map[string]*Plan {
+	return map[string]*Plan{
+		"fixture": fixturePlan(t, Quirks{}),
+		"mixed":   mixedPlan(t),
+		"req":     newPlan(t, Plan{MaxInst: 1, BudgetP: 1, Svc: []SvcPlan{{Restart: Always, Terminal: true, MaxA: 1}, {Restart: OnFailure, Grant: true, Req: []int{0}, MaxA: 1}}}),
+		"want":    newPlan(t, Plan{MaxInst: 1, BudgetP: 1, Svc: []SvcPlan{{Restart: OnFailure, MaxA: 1}, {Kind: Oneshot, Grant: true, Want: []int{0}, MaxA: 1}}}),
+	}
+}
+
+func TestGate1AbstractGreen(t *testing.T) {
+	for name, p := range absPlans(t) {
+		red, st, pairs, ex := gate1Abstract(p, preloaded(p), gate1AbsStates, gate1AbsPairs)
+		if red != "" {
+			t.Fatalf("%s: Gate 1 is red on the abstraction: %s", name, red)
+		}
+		t.Logf("%s: green, states=%d pairs=%d exhaustive=%t", name, st, pairs, ex)
+	}
+}
+
+// TestGate1AbstractClosesForOneCopy: the abstraction is finite. The state
+// space of one service is built to the end, and its size is pinned.
+func TestGate1AbstractClosesForOneCopy(t *testing.T) {
+	p := newPlan(t, Plan{MaxInst: 1, BudgetP: 1, Svc: []SvcPlan{{Restart: OnFailure, Grant: true, MaxA: 1}}})
+	g := buildGraph(p, preloaded(p), 100000)
+	if got := len(g.worlds); got != 25932 || g.next[len(g.next)-1] == nil {
+		t.Fatalf("one-service abstraction has %d states, want 25932 with the frontier empty", got)
+	}
+}
+
+func TestGate1AbstractWitnesses(t *testing.T) {
+	for name, p := range map[string]*Plan{
+		"GoalDraft8":     fixturePlan(t, Quirks{GoalNoCut: true}),
+		"FreeAcrossCut":  fixturePlan(t, Quirks{FreeAcrossCut: true}),
+		"RetryPayCaller": newPlan(t, Plan{Quirks: Quirks{RetryPayCaller: true}, Svc: []SvcPlan{{Restart: Always, Terminal: true}, {Restart: OnFailure, Grant: true, MaxA: 1}}}),
+	} {
+		red, st, pairs, _ := gate1Abstract(p, preloaded(p), gate1AbsStates, gate1AbsPairs)
+		t.Logf("%s: red=%t states=%d pairs=%d", name, red != "", st, pairs)
+		if red == "" {
+			t.Errorf("%s: the abstraction does not see the defect", name)
+		}
+	}
+}
+
+func TestSmokeGate1Green(t *testing.T) {
 	for name, p := range map[string]*Plan{
 		"fixture": fixturePlan(t, Quirks{}),
 		"mixed":   mixedPlan(t),

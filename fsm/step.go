@@ -321,13 +321,12 @@ func (p *Plan) dependents(set, goal uint32) uint32 {
 // reverseClosure is set plus every service that reaches it through uncut
 // require and want edges.
 func (p *Plan) reverseClosure(set uint32) uint32 {
-	for {
-		more := set | p.dependents(set, ^uint32(0))
-		if more == set {
-			return set
-		}
-		set = more
+	// Each pass adds a service or changes nothing, so len(Svc) passes
+	// reach the fixpoint; no test of "nothing changed" is needed.
+	for range p.Svc {
+		set |= p.dependents(set, ^uint32(0))
 	}
+	return set
 }
 
 // stop is `stop X` of section 2.3 (N12): refused with ErrStillWanted while an
@@ -697,10 +696,15 @@ func (p *Plan) moveCap() int { return 32 * len(p.Svc) * len(p.Svc) }
 // G_free holds in the world phase 1 ended in; it is order independent.
 func (r *run) round(order []int, rev bool) error {
 	for _, i := range order {
-		for r.fire(i, false) {
-			if len(r.res.Moves) > r.p.moveCap() {
-				return ErrNoFixpoint
+		settled := false
+		for len(r.res.Moves) <= r.p.moveCap() {
+			if !r.fire(i, false) {
+				settled = true
+				break
 			}
+		}
+		if !settled {
+			return ErrNoFixpoint
 		}
 	}
 	goal := r.p.Goals(r.w)

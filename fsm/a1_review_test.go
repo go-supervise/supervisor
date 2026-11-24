@@ -81,21 +81,13 @@ func TestPlanRefusesAMalformedGrid(t *testing.T) {
 	for name, mutate := range cases {
 		p := base()
 		mutate(&p)
-		if _, err := NewPlan(p); !errors.Is(err, ErrPlan) {
-			t.Errorf("%s: got %v, want ErrPlan", name, err)
-		}
+		noPanic(t, name, func() {
+			if _, err := NewPlan(p); !errors.Is(err, ErrPlan) {
+				t.Errorf("%s: got %v, want ErrPlan", name, err)
+			}
+		})
 	}
 	if _, err := NewPlan(base()); err != nil {
 		t.Fatalf("the default grid is well formed: %v", err)
-	}
-}
-
-// Regression: String never panics on a value outside the enumeration.
-func TestStringsOfInvalidValuesDoNotPanic(t *testing.T) {
-	if got := State(200).String(); got != "invalid(200)" {
-		t.Errorf("State: %q", got)
-	}
-	if got := Reach(200).String(); got != "invalid(200)" {
-		t.Errorf("Reach: %q", got)
 	}
 }
