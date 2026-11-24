@@ -49,11 +49,13 @@ jobs:
 
   # Privileged lane (SUPERVISOR.md 7.1.1): the spawn path and svd helper under
   # root with every capability, in a container. SVD_PRIVILEGED=1 makes an absent
-  # capability or id a FAILURE of the test, never a skip.
+  # capability or id a FAILURE of the test, never a skip. It also runs the M_p
+  # syscall-surface gate (TestMonitorSyscallSurface, TestMonitorSymbolAbsence,
+  # TestMonitorSyscallSurfaceCatches): seccomp kill plus the ptrace recorder.
   privileged:
     name: privileged (linux container)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: spawn and helper tests as root
@@ -61,7 +63,7 @@ jobs:
           docker run --rm --privileged
           -e SVD_PRIVILEGED=1 -e GOFLAGS=-buildvcs=false
           -v "$PWD:/src" -w /src golang:1.27
-          go test -race -count=1 ./internal/spawn/ ./internal/helper/ ./internal/keyring/ ./internal/stagestub/ ./cmd/svd/
+          go test -race -count=1 ./internal/spawn/ ./internal/helper/ ./internal/keyring/ ./internal/stagestub/ ./cmd/svd/ ./internal/surface/ ./internal/monitor/ ./cmd/syscallsurface/ ./cmd/svd-monitor/
 
   govulncheck:
     runs-on: ubuntu-latest
