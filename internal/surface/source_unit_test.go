@@ -195,7 +195,10 @@ func TestGenerateSysNumRefusesWhatItCannotLoad(t *testing.T) {
 	if testing.Short() {
 		t.Skip("loads packages (the gate1 job runs it)")
 	}
-	_, err := GenerateSysNum(filepath.Join(t.TempDir(), "absent"), "amd64")
+	var err error
+	noPanic(t, "an absent directory", func() {
+		_, err = GenerateSysNum(filepath.Join(t.TempDir(), "absent"), "amd64")
+	})
 	if err == nil || strings.HasPrefix(err.Error(), "surface: cannot load") {
 		t.Errorf("an absent directory: %v", err)
 	}
