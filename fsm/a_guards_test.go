@@ -12,7 +12,7 @@ func refuses(t *testing.T, p *Plan, w *World, in Input, want error) {
 	t.Helper()
 	defer func() {
 		if r := recover(); r != nil {
-			t.Errorf("%+v panicked (%v), want %v", in, r, want)
+			t.Errorf("%+v: got a crash (%v), want %v", in, r, want)
 		}
 	}()
 	if _, _, err := p.Step(w, in); !errors.Is(err, want) {
@@ -42,7 +42,7 @@ func TestPlanEdgesOutsideThePlanAreRefused(t *testing.T) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					t.Errorf("edge to %d panicked: %v", e, r)
+					t.Errorf("edge to %d: got a crash (%v), want ErrPlan", e, r)
 				}
 			}()
 			_, err := NewPlan(Plan{MaxInst: 1, BudgetP: 1, Window: 1, Initial: 1, Factor: 1, BackoffMax: 1,
