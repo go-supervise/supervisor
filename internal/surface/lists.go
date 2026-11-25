@@ -57,6 +57,12 @@ var ForkChildGated = []string{
 // AllowedAttr are the only SysProcAttr fields M_p may set.
 var AllowedAttr = []string{"Setsid", "Cloneflags", "UseCgroupFD", "CgroupFD", "PidFD"}
 
+// AllowedCloneflags is the mask the one SysProcAttr M_p builds may hold in
+// Cloneflags: CLONE_NEWNS, CLONE_NEWIPC and CLONE_NEWNET. The low byte (the
+// exit signal) and every other bit (CLONE_NEWUSER, CLONE_PARENT, CLONE_VM, ...)
+// change what the dynamic judge assumes, so a value outside it is refused.
+const AllowedCloneflags uint64 = 0x00020000 | 0x08000000 | 0x40000000
+
 // Absent is the committed list of symbols svd-monitor must not link (7.1.2
 // item 3).
 var Absent = []string{
