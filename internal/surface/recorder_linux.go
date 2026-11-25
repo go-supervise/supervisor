@@ -193,13 +193,11 @@ func step(tid int, t *tracee, recording bool, names map[int64]string, out *Recor
 		for i := range c.Args {
 			c.Args[i] = binary.LittleEndian.Uint64(info[32+8*i:])
 		}
-		switch names[c.Nr] {
-		case "openat":
-			if uint32(c.Args[0]) == atFdcwd32 {
-				c.Path = readString(tid, uintptr(c.Args[1]))
+		if i, ok := cwdPathArg(names[c.Nr], c.Args); ok {
+			c.Cwd = true
+			if s, ok := readString(tid, uintptr(c.Args[i])); ok {
+				c.Path = s
 			}
-		case "open":
-			c.Path = readString(tid, uintptr(c.Args[0]))
 		}
 		out.Calls = append(out.Calls, c)
 		t.last = &c
@@ -207,20 +205,27 @@ func step(tid int, t *tracee, recording bool, names map[int64]string, out *Recor
 	return nil
 }
 
-// readString reads a NUL-terminated string of the tracee, a word at a time.
-func readString(tid int, addr uintptr) string {
+// readString reads a NUL-terminated string of the tracee, a word at a time. It
+// answers false when the string could not be read whole: an unreadable address,
+// or no NUL within maxPath bytes.
+func readString(tid int, addr uintptr) (string, bool) {
 	var s []byte
 	var w [8]byte
 	for len(s) < maxPath {
+		n := len(w)
 		if _, err := unix.PtracePeekData(tid, addr+uintptr(len(s)), w[:]); err != nil {
-			return string(s)
+			// a word that crosses the end of a mapping: take the next byte alone
+			n = 1
+			if _, err := unix.PtracePeekData(tid, addr+uintptr(len(s)), w[:1]); err != nil {
+				return "", false
+			}
 		}
-		for _, b := range w {
+		for _, b := range w[:n] {
 			if b == 0 {
-				return string(s)
+				return string(s), true
 			}
 			s = append(s, b)
 		}
 	}
-	return string(s)
+	return "", false
 }

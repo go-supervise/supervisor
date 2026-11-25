@@ -22,7 +22,7 @@ func source(t *testing.T, arch, name string, tags ...string) *Result {
 	// the fixtures that exercise the checks made INSIDE the one function allowed
 	// to build a SysProcAttr are that function; every other fixture is not
 	switch name {
-	case "attr", "attrglobal", "attrloaded", "forkok", "twinattr", "paramattr":
+	case "attr", "attrglobal", "attrloaded", "forkok", "twinattr", "paramattr", "wrapperattr", "cloneparam", "cloneuser", "cloneok", "clonephi", "cloneloop", "clonelookalike", "cloneand", "cloneset", "clonetwo":
 		o.AttrConstructors = []string{"github.com/go-supervise/supervisor/" + fixDir + name + "."}
 	}
 	r, err := SourceHalf(o)
@@ -113,6 +113,25 @@ func TestSourceHalfRefusesWhatItCouldNotSee(t *testing.T) {
 		// a type that holds a SysProcAttr is a reference to it
 		{"jsonproc", []string{`syscall.SysProcAttr is used in `, `jsonproc.main`}},
 		{"gobproc", []string{`syscall.SysProcAttr is used in `, `gobproc.main`}},
+		// a function only the runtime calls is reached all the same
+		{"finalizer", []string{`reached system call "kill" at `, `(never allowed)`}},
+		// every directory-descriptor call, not openat alone
+		{"fdcwdother", []string{`unlinkat with AT_FDCWD at ` + fixDir + `fdcwdother/main.go:`}},
+		// a wrapper struct that holds the attribute and leaves as an interface
+		{"wrapperattr", []string{`SysProcAttr is not a composite literal at `, `is converted to an interface at `}},
+		// Cloneflags: a value from the caller, and a constant outside the mask
+		{"cloneparam", []string{`Cloneflags set at ` + fixDir + `cloneparam/main.go:`, `that is not a constant within the mask`}},
+		{"cloneuser", []string{`Cloneflags set at ` + fixDir + `cloneuser/main.go:`, `that is not a constant within the mask`}},
+		// one branch of a conditional is enough
+		{"clonephi", []string{`Cloneflags set at ` + fixDir + `clonephi/main.go:`, `that is not a constant within the mask`}},
+		// only a constant, or a choice between constants, may be stored
+		{"cloneloop", []string{`Cloneflags set at ` + fixDir + `cloneloop/main.go:`, `that is not a constant within the mask`}},
+		{"cloneand", []string{`Cloneflags set at ` + fixDir + `cloneand/main.go:`, `that is not a constant within the mask`}},
+		// the field's address must be used by one store and nothing else
+		{"cloneset", []string{`Cloneflags is used other than by a store at ` + fixDir + `cloneset/main.go:`}},
+		{"clonetwo", []string{`Cloneflags is used other than by a single store at ` + fixDir + `clonetwo/main.go:`}},
+		// a raw system call receives AT_FDCWD as the wrappers do
+		{"rawfdcwd", []string{`mkdirat with AT_FDCWD at ` + fixDir + `rawfdcwd/main.go:`}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -194,6 +213,83 @@ func TestSourceHalfForkChildIsGatedByTheAttr(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Cloneflags built as spawn.Start builds it (constants inside the mask, one of
+// them under a condition) is not a finding.
+func TestSourceHalfAcceptsCloneflagsInsideTheMask(t *testing.T) {
+	// another type's Cloneflags field is not the attribute's
+	for _, name := range []string{"cloneok", "clonelookalike"} {
+		t.Run(name, func(t *testing.T) {
+			r := source(t, "amd64", name)
+			if len(r.Failures) != 0 {
+				t.Fatalf("failures:\n%s", strings.Join(r.Failures, "\n"))
+			}
+		})
+	}
+}
+
+// A sink that names no function of the program guards nothing: refused.
+func TestSourceHalfRefusesASinkThatResolvesNowhere(t *testing.T) {
+	const stale = "internal/runtime/syscall.Syscall6"
+	sinks[stale] = true
+	t.Cleanup(func() { delete(sinks, stale) })
+	r := source(t, "amd64", "ok")
+	want := "source: the sink " + stale + " names no function of the analysed program"
+	if !has(r.Failures, want) {
+		t.Fatalf("failures:\n%s\nwant %q", strings.Join(r.Failures, "\n"), want)
+	}
+}
+
+// The module's root package is the module's own: a call reached from it is
+// attributed to its source line, not to the library below.
+func TestSourceHalfAttributesToTheModuleRootPackage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("loads packages (the gate1 job runs it)")
+	}
+	ver, err := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "golang.org/x/sys").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum, err := os.ReadFile("../../go.sum")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"go.mod":  "module example.test/root\n\ngo 1.25.0\n\nrequire golang.org/x/sys " + strings.TrimSpace(string(ver)) + "\n",
+		"go.sum":  string(sum),
+		"main.go": "package main\n\nimport \"golang.org/x/sys/unix\"\n\nfunc main() { _ = unix.Kill(1, 9) }\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := SourceHalf(Options{Dir: dir, Entry: ".", GOARCH: "amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `source: reached system call "kill" at main.go:5:28 (never allowed)`
+	if !has(r.Failures, want) {
+		t.Fatalf("failures:\n%s\nwant %q", strings.Join(r.Failures, "\n"), want)
+	}
+}
+
+func TestInModule(t *testing.T) {
+	for _, c := range []struct {
+		path, module string
+		want         bool
+	}{
+		{"example.test/m", "example.test/m", true},
+		{"example.test/m/x", "example.test/m", true},
+		{"example.test/mx", "example.test/m", false},
+		{"example.test", "example.test/m", false},
+		{"syscall", "", false},
+	} {
+		if got := inModule(c.path, c.module); got != c.want {
+			t.Errorf("inModule(%q, %q) = %v", c.path, c.module, got)
+		}
 	}
 }
 

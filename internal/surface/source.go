@@ -70,8 +70,8 @@ var sinks = map[string]bool{
 	unixPath + ".Syscall": true, unixPath + ".Syscall6": true,
 	unixPath + ".Syscall9": true, unixPath + ".RawSyscall": true,
 	unixPath + ".RawSyscall6": true, unixPath + ".SyscallNoError": true,
-	unixPath + ".RawSyscallNoError":     true,
-	"internal/runtime/syscall.Syscall6": true,
+	unixPath + ".RawSyscallNoError":           true,
+	"internal/runtime/syscall/linux.Syscall6": true,
 	// the all-threads variants (set*id and set groups go through them); the
 	// number is the first argument of each, and the bodyless target is the
 	// runtime's own entry.
@@ -120,11 +120,55 @@ func (a *analysis) noBody(f *ssa.Function) bool {
 	return !sinks[name] && !a.std[f.Pkg.Pkg.Path()] && !bodylessAllowed[name]
 }
 
-// openers are the dirfd-taking open calls whose first argument must not be
-// the constant AT_FDCWD (-100).
-var openers = map[string]bool{
-	"syscall.openat": true, "syscall.Openat": true,
-	unixPath + ".openat": true, unixPath + ".Openat": true,
+// dirfdParams are the indexes of the parameters of f that are directory
+// descriptors, by the name the system-call wrappers give them ("dirfd",
+// "olddirfd", "newdirfd"): the argument there must not be the constant AT_FDCWD
+// (-100). The receiver of a method counts as the first parameter.
+func dirfdParams(f *ssa.Function) []int {
+	var out []int
+	for i, p := range f.Params {
+		if strings.HasSuffix(strings.ToLower(p.Name()), "dirfd") {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// rawDirfd are the argument positions (after the system-call number) that are
+// directory descriptors of a system call reached through a raw Syscall: the
+// wrappers' parameter names do not exist there, so the call number names them.
+var rawDirfd = map[string][]int{
+	"openat": {0}, "openat2": {0}, "mkdirat": {0}, "mknodat": {0}, "unlinkat": {0},
+	"fchownat": {0}, "fchmodat": {0}, "fchmodat2": {0}, "newfstatat": {0}, "statx": {0},
+	"readlinkat": {0}, "symlinkat": {1}, "linkat": {0, 2}, "renameat": {0, 2},
+	"renameat2": {0, 2}, "faccessat": {0}, "faccessat2": {0}, "utimensat": {0},
+	"futimesat": {0}, "execveat": {0}, "name_to_handle_at": {0}, "open_tree": {0},
+	"move_mount": {0, 2}, "mount_setattr": {0}, "fstatat": {0},
+}
+
+// isFdcwd says whether v is the constant AT_FDCWD (-100), as a signed value or
+// as the unsigned word (or its low 32 bits) a raw system call receives.
+func isFdcwd(v ssa.Value) bool {
+	for {
+		switch x := v.(type) {
+		case *ssa.Convert:
+			v = x.X
+			continue
+		case *ssa.ChangeType:
+			v = x.X
+			continue
+		case *ssa.Const:
+			if x.Value == nil || x.Value.Kind() != constant.Int {
+				return false
+			}
+			if i, ok := constant.Int64Val(x.Value); ok && i == -100 {
+				return true
+			}
+			u, ok := constant.Uint64Val(x.Value)
+			return ok && (u == ^uint64(99) || u == atFdcwd32)
+		}
+		return false
+	}
 }
 
 // unresolvable calls make a reached call the analysis cannot resolve.
@@ -160,6 +204,9 @@ func SourceHalf(o Options) (*Result, error) {
 		return nil, err
 	}
 	if err := CheckToolchain(built, o.GOARCH); err != nil {
+		return nil, err
+	}
+	if err := checkBuildEnv(o.Dir, env); err != nil {
 		return nil, err
 	}
 	var flags []string
@@ -211,7 +258,12 @@ func SourceHalf(o Options) (*Result, error) {
 		}
 		return true
 	}, nil)
-	a.reach(roots)
+	// a function the runtime calls with no call edge (a finalizer, a cleanup)
+	// is reached too: every function of the module is a root
+	a.rt = a.runtimePackages()
+	funcs := ssautil.AllFunctions(prog)
+	a.reach(append(roots, a.moduleRoots(funcs)...))
+	a.checkSinks(funcs)
 	a.checkSites()
 	a.checkAttr()
 	a.checkImports(pkgs)
@@ -239,6 +291,7 @@ type analysis struct {
 	names   map[int64]string
 	module  string
 	std     map[string]bool                   // import paths no module holds: the standard library
+	rt      map[*ssa.Package]bool             // the runtime's own packages
 	parent  map[*ssa.Function]*callgraph.Edge // BFS tree: how a function was first reached
 	order   []*ssa.Function
 	inOrder map[*ssa.Function]bool
@@ -280,6 +333,41 @@ func (a *analysis) reach(roots []*ssa.Function) {
 	}
 }
 
+// moduleRoots are the functions of the module (methods, closures and
+// instantiations included), in a fixed order.
+func (a *analysis) moduleRoots(funcs map[*ssa.Function]bool) []*ssa.Function {
+	var out []*ssa.Function
+	for f := range funcs {
+		if a.mine(f) {
+			out = append(out, f)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out
+}
+
+// absentSinks are the sinks go1.27 does not define on the linux ports checked
+// (amd64, arm64): kept as guards in case another toolchain or port brings them
+// back. Every other sink must resolve in the program.
+var absentSinks = map[string]bool{
+	"syscall.Syscall9": true, "syscall.RawSyscallNoError": true,
+	"syscall.SyscallNoError": true, unixPath + ".Syscall9": true,
+}
+
+// checkSinks refuses a sink that names no function of the analysed program: a
+// stale name (a package renamed by a toolchain) would guard nothing, silently.
+func (a *analysis) checkSinks(funcs map[*ssa.Function]bool) {
+	have := map[string]bool{}
+	for f := range funcs {
+		have[qname(f)] = true
+	}
+	for s := range sinks {
+		if !have[s] && !absentSinks[s] {
+			a.fail("the sink %s names no function of the analysed program", s)
+		}
+	}
+}
+
 func (a *analysis) pos(p token.Pos) string {
 	s := a.prog.Fset.Position(p).String()
 	if abs, err := filepath.Abs(a.o.Dir); err == nil {
@@ -289,7 +377,14 @@ func (a *analysis) pos(p token.Pos) string {
 }
 
 func (a *analysis) mine(f *ssa.Function) bool {
-	return f.Pkg != nil && a.module != "" && strings.HasPrefix(f.Pkg.Pkg.Path(), a.module+"/")
+	p := pkgOf(f)
+	return p != nil && inModule(p.Pkg.Path(), a.module)
+}
+
+// inModule reports whether the package path is the module's root package or one
+// below it ("mod" and "mod/x", never "modx").
+func inModule(path, module string) bool {
+	return module != "" && (path == module || strings.HasPrefix(path, module+"/"))
 }
 
 // callSite names where M_p's own code reaches the call that e makes: the
@@ -380,7 +475,7 @@ func (a *analysis) checkSites() {
 			}
 			args := e.Site.Common().Args
 			switch {
-			case sinks[callee] && !sinks[qname(f)]:
+			case sinks[callee] && !sinks[qname(f)] && !a.runtimeOwn(f):
 				nr, ok := a.constInt(args[0])
 				if !ok {
 					a.fail("non-constant system-call number at %s (in %s)", a.pos(e.Site.Pos()), f.String())
@@ -390,6 +485,14 @@ func (a *analysis) checkSites() {
 				if !known {
 					name = fmt.Sprintf("syscall#%d", nr)
 				}
+				if !forkChild(f) && !a.onlyFromForkChild(f) {
+					for _, i := range rawDirfd[name] {
+						if i+1 < len(args) && isFdcwd(args[i+1]) {
+							a.fail("%s with AT_FDCWD at %s", name, a.callSite(e))
+							a.res.Chains[name+"(AT_FDCWD)"] = a.chain(f)
+						}
+					}
+				}
 				if gated[name] && forkChild(f) {
 					continue // behind a SysProcAttr field, which checkAttr refuses
 				}
@@ -398,10 +501,18 @@ func (a *analysis) checkSites() {
 					a.first[name] = a.callSite(e)
 					a.res.Chains[name] = a.chain(f)
 				}
-			case openers[callee] && len(args) > 0:
-				if v, ok := a.constInt(args[0]); ok && v == -100 && !forkChild(f) && !a.onlyFromForkChild(f) {
-					a.fail("openat with AT_FDCWD at %s", a.callSite(e))
-					a.res.Chains["openat(AT_FDCWD)"] = a.chain(f)
+			}
+			// a call that takes a directory descriptor (openat, mkdirat, unlinkat,
+			// fchownat, newfstatat, statx, ...) must not be given AT_FDCWD
+			if !forkChild(f) && !a.onlyFromForkChild(f) {
+				for _, i := range dirfdParams(e.Callee.Func) {
+					if i < len(args) {
+						if v, ok := a.constInt(args[i]); ok && v == -100 {
+							name := strings.ToLower(e.Callee.Func.Name())
+							a.fail("%s with AT_FDCWD at %s", name, a.callSite(e))
+							a.res.Chains[name+"(AT_FDCWD)"] = a.chain(f)
+						}
+					}
 				}
 			}
 		}
@@ -409,6 +520,25 @@ func (a *analysis) checkSites() {
 	for n := range reached {
 		a.res.Reached = append(a.res.Reached, n)
 	}
+}
+
+// runtimeOwn reports whether f is the Go runtime's own code, whose system calls
+// are what R_go records and the dynamic half judges. Only a package of the
+// standard library counts: no module can pass for it by its name.
+func (a *analysis) runtimeOwn(f *ssa.Function) bool {
+	return a.rt[pkgOf(f)]
+}
+
+// runtimePackages are the packages of the program that make up the Go runtime.
+func (a *analysis) runtimePackages() map[*ssa.Package]bool {
+	out := map[*ssa.Package]bool{}
+	for _, p := range a.prog.AllPackages() {
+		path := p.Pkg.Path()
+		if a.std[path] && (path == "runtime" || strings.HasPrefix(path, "internal/runtime/")) {
+			out[p] = true
+		}
+	}
+	return out
 }
 
 // forkChild reports whether f is part of Go's fork child or its ID-mapping
@@ -569,6 +699,69 @@ func (k attrTypes) walk(t types.Type, seen map[types.Type]bool) int {
 	return kindNone
 }
 
+func isDebugRef(in ssa.Instruction) bool { _, ok := in.(*ssa.DebugRef); return ok }
+
+// isAttrField reports whether fa is the address of the named field of a
+// SysProcAttr (or of a type of its layout).
+func (k attrTypes) isAttrField(fa *ssa.FieldAddr, name string) bool {
+	pt, ok := types.Unalias(fa.X.Type()).Underlying().(*types.Pointer)
+	if !ok || !k.isAttr(pt.Elem()) {
+		return false
+	}
+	s := types.Unalias(pt.Elem()).Underlying().(*types.Struct)
+	return s.Field(fa.Field).Name() == name
+}
+
+// checkCloneflags judges one address of a SysProcAttr's Cloneflags field by
+// construction: the address has exactly one use, a store, and the stored value
+// is a constant inside the mask or a phi whose every edge is one. No arithmetic,
+// parameter, load or call result is accepted, and the address cannot escape to a
+// callee or be read back, so nothing can change the flags after this check.
+func (a *analysis) checkCloneflags(fa *ssa.FieldAddr) {
+	var uses []ssa.Instruction
+	for _, r := range *fa.Referrers() {
+		if !isDebugRef(r) {
+			uses = append(uses, r)
+		}
+	}
+	if len(uses) > 1 {
+		a.fail("SysProcAttr Cloneflags is used other than by a single store at %s", a.pos(uses[1].Pos()))
+		return
+	}
+	for _, u := range uses {
+		s, ok := u.(*ssa.Store)
+		if !ok || s.Addr != fa {
+			a.fail("SysProcAttr Cloneflags is used other than by a store at %s", a.pos(u.Pos()))
+			return
+		}
+		if !cloneflagsConst(s.Val, AllowedCloneflags) {
+			a.fail("SysProcAttr Cloneflags set at %s to a value that is not a constant within the mask %#x", a.pos(s.Pos()), uint64(AllowedCloneflags))
+		}
+	}
+}
+
+// cloneflagsConst says whether v is a constant inside mask, or a phi whose
+// every edge is one.
+func cloneflagsConst(v ssa.Value, mask uint64) bool {
+	if p, ok := v.(*ssa.Phi); ok {
+		for _, e := range p.Edges {
+			if c, isConst := e.(*ssa.Const); !isConst || !constWithin(c, mask) {
+				return false
+			}
+		}
+		return true
+	}
+	c, ok := v.(*ssa.Const)
+	return ok && constWithin(c, mask)
+}
+
+func constWithin(c *ssa.Const, mask uint64) bool {
+	// a value that is no integer (or none at all) converts to the unknown
+	// constant, which has no Uint64 value
+	u, ok := constant.Uint64Val(constant.ToInt(c.Value))
+	return ok && u&^mask == 0
+}
+
 // origin says whether v is a value the allowed constructor may hold: an
 // allocation made in f, a field address of one, or the nil constant. A
 // parameter, a free variable, a global, a conversion, a load, a phi of
@@ -667,16 +860,32 @@ func (a *analysis) checkAttr() {
 				switch in := in.(type) {
 				case *ssa.FieldAddr:
 					field(in, in.X, in.Field)
+					if k.isAttrField(in, "Cloneflags") {
+						a.checkCloneflags(in)
+					}
 				case *ssa.Field:
 					field(in, in.X, in.Field)
+				case *ssa.MakeInterface:
+					// a decoder or any reflective callee writes through an
+					// interface, whatever the allocation was
+					if k.kind(in.X.Type()) != kindNone {
+						a.fail("a value of SysProcAttr or Credential (or holding one) is converted to an interface at %s", a.pos(in.Pos()))
+					}
 				case *ssa.Alloc:
 					pt, isPtr := in.Type().(*types.Pointer)
-					if !isPtr || !k.isAttr(pt.Elem()) || k.kind(pt.Elem()) != kindAttr {
+					if !isPtr || k.kind(pt.Elem()) == kindNone {
 						continue
 					}
+					// the allocation of the attribute, and of anything holding
+					// one (a ProcAttr, a wrapper struct): only its fields are
+					// written, and a holder may be passed to a call by type
 					for _, r := range *in.Referrers() {
 						switch r.(type) {
 						case *ssa.FieldAddr, *ssa.Store, *ssa.DebugRef:
+						case *ssa.Call:
+							if k.isAttr(pt.Elem()) {
+								a.fail("SysProcAttr is not a composite literal at %s", a.pos(r.Pos()))
+							}
 						default:
 							a.fail("SysProcAttr is not a composite literal at %s", a.pos(r.Pos()))
 						}

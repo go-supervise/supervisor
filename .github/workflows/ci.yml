@@ -65,17 +65,21 @@ jobs:
   # syscall-surface gate (TestMonitorSyscallSurface, TestMonitorSymbolAbsence,
   # TestMonitorSyscallSurfaceCatches): seccomp kill plus the ptrace recorder.
   privileged:
-    name: privileged (linux container)
-    runs-on: ubuntu-latest
+    name: privileged (linux container, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: generated R_go of amd64 (printed, to be committed as rgo_amd64.txt)
+      - name: generated R_go of the lane architecture (printed)
         run: >
           docker run --rm --privileged
           -e GOFLAGS=-buildvcs=false
           -v "$PWD:/src" -w /src golang:1.27
-          sh -c 'go build -o /tmp/ss ./cmd/syscallsurface && go build -o /tmp/ref ./internal/surface/refprog && go build -ldflags=-X=runtime.godebugDefault=asyncpreemptoff=1 -o /tmp/stub ./internal/surface/stubhelper && /tmp/ss rgo --arch amd64 --refprog /tmp/ref --stub /tmp/stub --out /tmp/rgo.txt; cat /tmp/rgo.txt'
+          sh -c 'go build -o /tmp/ss ./cmd/syscallsurface && go build -o /tmp/ref ./internal/surface/refprog && go build -ldflags=-X=runtime.godebugDefault=asyncpreemptoff=1 -o /tmp/stub ./internal/surface/stubhelper && /tmp/ss rgo --arch $(go env GOARCH) --refprog /tmp/ref --stub /tmp/stub --out /tmp/rgo.txt; cat /tmp/rgo.txt'
       - name: spawn and helper tests as root
         run: >
           docker run --rm --privileged

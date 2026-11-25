@@ -48,6 +48,11 @@ type kernelOps struct {
 	execveat          func(fd int, argv, envp []*byte) error
 }
 
+// closeRangeLast is the last descriptor of close_range's range: the kernel's
+// unsigned int maximum on every word size, never derived from the word size
+// (a shifted all-ones word is 0 on a 32-bit build, which closes nothing).
+const closeRangeLast = uintptr(0xFFFFFFFF)
+
 func closeRange(first, last, flags uintptr) error {
 	if _, _, e := unix.Syscall(unix.SYS_CLOSE_RANGE, first, last, flags); e != 0 {
 		return e

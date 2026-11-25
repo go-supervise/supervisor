@@ -167,7 +167,8 @@ func TestJudgeCallChecks(t *testing.T) {
 		copy(c.Args[:], args)
 		return c
 	}
-	withPath := func(name, path string) Call { c := call(name); c.Path = path; return c }
+	withPath := func(name, path string) Call { c := call(name); c.Cwd, c.Path = true, path; return c }
+	unread := func(name string) Call { c := call(name); c.Cwd = true; return c }
 	for _, c := range []struct {
 		name  string
 		calls []Call
@@ -186,12 +187,19 @@ func TestJudgeCallChecks(t *testing.T) {
 		{"runtime path", []Call{withPath("openat", hpagePath)}, nil},
 		{"open path", nil, []string{`dynamic: open(AT_FDCWD) of "/etc/passwd"`}},
 		{"openat path", []Call{withPath("openat", "/etc/passwd")}, []string{`dynamic: openat(AT_FDCWD) of "/etc/passwd"`}},
-		{"openat without a path", []Call{call("openat")}, nil},
+		// a call given a real directory descriptor is not relative to the cwd
+		{"openat of a descriptor", []Call{call("openat")}, nil},
+		// every call that takes a directory descriptor, not openat alone
+		{"mkdirat path", []Call{withPath("mkdirat", "/x")}, []string{`dynamic: mkdirat(AT_FDCWD) of "/x"`}},
+		{"unlinkat runtime path", []Call{withPath("unlinkat", hpagePath)}, []string{`dynamic: unlinkat(AT_FDCWD) of "` + hpagePath + `"`}},
+		// a path the recorder could not read is a failure, never a pass
+		{"openat unread", []Call{unread("openat")}, []string{`dynamic: openat(AT_FDCWD) of a path that could not be read`}},
+		{"statx unread", []Call{unread("statx")}, []string{`dynamic: statx(AT_FDCWD) of a path that could not be read`}},
 	} {
 		r := &Recording{Leader: 77, Calls: c.calls}
 		if c.name == "open path" {
 			// open has no number on arm64: judge it on amd64
-			r.Calls = []Call{{Nr: nr(t, "amd64", "open"), Path: "/etc/passwd"}}
+			r.Calls = []Call{{Nr: nr(t, "amd64", "open"), Cwd: true, Path: "/etc/passwd"}}
 			if got := Judge("amd64", r, 0); !reflect.DeepEqual(got, c.out) {
 				t.Errorf("%s: %q, want %q", c.name, got, c.out)
 			}
@@ -199,6 +207,35 @@ func TestJudgeCallChecks(t *testing.T) {
 		}
 		if got := Judge(arch, r, 0); !reflect.DeepEqual(got, c.out) {
 			t.Errorf("%s: %q, want %q", c.name, got, c.out)
+		}
+	}
+}
+
+func TestCwdPathArg(t *testing.T) {
+	const cwd = 0xffffffffffffff9c // AT_FDCWD, sign-extended as a kernel argument
+	for _, c := range []struct {
+		name string
+		args [6]uint64
+		idx  int
+		ok   bool
+	}{
+		{"openat", [6]uint64{cwd}, 1, true},
+		{"openat", [6]uint64{0xffffff9c}, 1, true}, // the low 32 bits decide
+		{"openat", [6]uint64{5}, 0, false},
+		{"openat", [6]uint64{1<<32 | 5}, 0, false},
+		{"renameat", [6]uint64{5, 0, cwd}, 3, true},
+		{"renameat", [6]uint64{cwd, 0, 5}, 1, true},
+		{"symlinkat", [6]uint64{0, cwd}, 2, true},
+		{"fanotify_mark", [6]uint64{0, 0, 0, cwd}, 4, true},
+		{"move_mount", [6]uint64{5, 0, cwd}, 3, true},
+		{"open", [6]uint64{}, 0, true},
+		{"symlink", [6]uint64{}, 1, true},
+		{"read", [6]uint64{cwd}, 0, false},
+		{"execve", [6]uint64{}, 0, false},
+	} {
+		idx, ok := cwdPathArg(c.name, c.args)
+		if idx != c.idx || ok != c.ok {
+			t.Errorf("cwdPathArg(%s, %#x) = %d, %v; want %d, %v", c.name, c.args, idx, ok, c.idx, c.ok)
 		}
 	}
 }

@@ -8,8 +8,11 @@ package surface
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 	"go/version"
+	"os/exec"
+	"runtime/debug"
 	"sort"
 	"strings"
 )
@@ -56,6 +59,12 @@ var ForkChildGated = []string{
 
 // AllowedAttr are the only SysProcAttr fields M_p may set.
 var AllowedAttr = []string{"Setsid", "Cloneflags", "UseCgroupFD", "CgroupFD", "PidFD"}
+
+// AllowedCloneflags is the mask the one SysProcAttr M_p builds may hold in
+// Cloneflags: CLONE_NEWNS, CLONE_NEWIPC and CLONE_NEWNET. The low byte (the
+// exit signal) and every other bit (CLONE_NEWUSER, CLONE_PARENT, CLONE_VM, ...)
+// change what the dynamic judge assumes, so a value outside it is refused.
+const AllowedCloneflags uint64 = 0x00020000 | 0x08000000 | 0x40000000
 
 // Absent is the committed list of symbols svd-monitor must not link (7.1.2
 // item 3).
@@ -132,6 +141,58 @@ func CheckToolchain(built, arch string) error {
 	}
 	if got := version.Lang(built); got != want {
 		return fmt.Errorf("surface: built by %q (%s), but R_go for %s is generated for %s: build with that toolchain", built, got, arch, want)
+	}
+	return nil
+}
+
+// goEnvOf reads one variable as the go command resolves it (the process
+// environment, then the go env file); a variable so a test can stand a value in.
+var goEnvOf = func(dir string, env []string, key string) (string, error) {
+	c := exec.Command("go", "env", key)
+	c.Dir, c.Env = dir, env
+	out, err := c.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+// checkBuildEnv refuses an analysis whose go command would build with extra
+// flags or experiments: the shipped binary is built with both empty, so a
+// verdict on a program built with others judges another program.
+func checkBuildEnv(dir string, env []string) error {
+	for _, k := range []string{"GOFLAGS", "GOEXPERIMENT"} {
+		v, err := goEnvOf(dir, env, k)
+		if err != nil {
+			return fmt.Errorf("surface: reading %s: %w", k, err)
+		}
+		// -buildvcs=false only drops the VCS stamp: it changes no code
+		if v != "" && !(k == "GOFLAGS" && v == "-buildvcs=false") {
+			return fmt.Errorf("surface: %s=%q is set: the analysed program is built with it empty", k, v)
+		}
+	}
+	return nil
+}
+
+// CheckBuildInfo refuses a shipped binary whose recorded build settings are not
+// the ones the analysis was made under: the tags, CGO_ENABLED=0, no GOEXPERIMENT,
+// no extra flags and the architecture. The analysis judges the program built
+// that way, so a binary built another way is not the one judged.
+func CheckBuildInfo(bi *debug.BuildInfo, o Options) error {
+	if bi == nil {
+		return errors.New("surface: the binary carries no build information")
+	}
+	set := map[string]string{}
+	for _, s := range bi.Settings {
+		set[s.Key] = s.Value
+	}
+	want := map[string]string{"CGO_ENABLED": "0", "GOARCH": o.GOARCH, "-tags": strings.Join(o.Tags, ","), "GOOS": "linux"}
+	for _, k := range []string{"CGO_ENABLED", "GOARCH", "GOOS", "-tags"} {
+		if set[k] != want[k] {
+			return fmt.Errorf("surface: the binary was built with %s=%q, the analysis assumed %q", k, set[k], want[k])
+		}
+	}
+	for _, k := range []string{"GOEXPERIMENT", "-gcflags", "-ldflags", "-asmflags", "-race", "-msan", "-asan", "-cover"} {
+		if v := set[k]; v != "" && v != "false" {
+			return fmt.Errorf("surface: the binary was built with %s=%q: the analysis assumed none", k, v)
+		}
 	}
 	return nil
 }

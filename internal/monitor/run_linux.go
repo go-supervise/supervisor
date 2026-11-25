@@ -3,6 +3,7 @@
 package monitor
 
 import (
+	"errors"
 	"strconv"
 
 	"golang.org/x/sys/unix"
@@ -29,33 +30,123 @@ type Live struct {
 	Child  *spawn.Child
 	Epoch  string
 	Notify string
+	// Gone is set when the sweep of the subreaper's children collected this
+	// child's exit before its reap acknowledgement came.
+	Gone bool
 }
 
 // Host is what M_p asks of the system for a spawn and for its reaping; the
 // production host is NewHost, tests substitute their own.
 type Host interface {
 	Start(c *spawn.Config) (*spawn.Child, error)
+	// Reap collects a child the core has acknowledged. It waits a bounded time
+	// for a child that is still running and then returns ErrChildRunning,
+	// releasing nothing: M_p is never stalled by a live child.
 	Reap(l *Live) error
+	// Sweep collects every exited child of the subreaper that is not live (the
+	// orphans of a service's tree, reparented to M_p), and marks a live child it
+	// collected as Gone.
+	Sweep(live map[uint32]*Live)
 }
 
-type realHost struct{ f Fds }
+// ErrChildRunning is Reap's answer for a child that has not exited.
+var ErrChildRunning = errors.New("monitor: child still running")
 
-// NewHost is the production Host: spawn.Start, and a waitid on the pidfd.
-func NewHost(f Fds) Host { return realHost{f} }
+// reapWaitMs bounds how long Reap waits for a child that is still running.
+const reapWaitMs = 1000
+
+type realHost struct {
+	f  Fds
+	ep int // an epoll instance for the bounded wait, or -1
+}
+
+// NewHost is the production Host: spawn.Start, and a waitid on the pidfd. It
+// runs before M_p's first receive, where creating an epoll instance is allowed.
+func NewHost(f Fds) Host {
+	ep, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
+	if err != nil {
+		ep = -1
+	}
+	return realHost{f, ep}
+}
 
 func (realHost) Start(c *spawn.Config) (*spawn.Child, error) { return spawn.Start(c) }
 
-func (h realHost) Reap(l *Live) error {
+// exited reports whether the pidfd's child has exited, collecting it if so.
+func exited(fd int) (bool, error) {
 	var info unix.Siginfo
 	var err error = unix.EINTR
 	for err == unix.EINTR {
-		err = unix.Waitid(unix.P_PIDFD, l.Child.PidFD, &info, unix.WEXITED, nil)
+		err = unix.Waitid(unix.P_PIDFD, fd, &info, unix.WEXITED|unix.WNOHANG, nil)
+	}
+	if err != nil {
+		return true, err // ECHILD: nothing left to wait for
+	}
+	// WNOHANG with the child still running leaves the structure zeroed
+	return info.Signo != 0, nil
+}
+
+// await waits up to reapWaitMs for the pidfd to become readable (its child
+// exited).
+func (h realHost) await(fd int) {
+	if h.ep < 0 {
+		return
+	}
+	ev := unix.EpollEvent{Events: unix.EPOLLIN}
+	if unix.EpollCtl(h.ep, unix.EPOLL_CTL_ADD, fd, &ev) != nil {
+		return
+	}
+	var out [1]unix.EpollEvent
+	for {
+		if _, err := unix.EpollWait(h.ep, out[:], reapWaitMs); err != unix.EINTR {
+			break
+		}
+	}
+	_ = unix.EpollCtl(h.ep, unix.EPOLL_CTL_DEL, fd, nil)
+}
+
+func (h realHost) Reap(l *Live) error {
+	var err error
+	if !l.Gone {
+		var done bool
+		if done, err = exited(l.Child.PidFD); err == nil && !done {
+			h.await(l.Child.PidFD)
+			done, err = exited(l.Child.PidFD)
+		}
+		if err == nil && !done {
+			return ErrChildRunning
+		}
 	}
 	l.Child.Close()
 	_ = unix.Unlinkat(h.f.Trees, l.Epoch, unix.AT_REMOVEDIR)
 	_ = unix.Unlinkat(h.f.Notify, l.Notify, 0)
 	return err
 }
+
+func (realHost) Sweep(live map[uint32]*Live) {
+	for i := 0; i < maxSweep; i++ {
+		var ws unix.WaitStatus
+		pid, err := unix.Wait4(-1, &ws, unix.WNOHANG, nil)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil || pid <= 0 {
+			return
+		}
+		for _, l := range live {
+			if l.Child.PID == pid {
+				l.Gone = true
+			}
+		}
+	}
+}
+
+// maxSweep bounds the children one sweep collects, so a flood of orphans cannot
+// hold the loop.
+const maxSweep = 256
+
+// sweepWaitMs is how long the loop idles before it sweeps again.
+const sweepWaitMs = 1000
 
 func say(fd int, s string) { _, _ = unix.Write(fd, []byte(s)) }
 
@@ -116,11 +207,19 @@ func Run(f Fds, h Host) int {
 	var evs [1]unix.EpollEvent
 	first := true
 	for {
-		if _, err := unix.EpollWait(ep, evs[:], -1); err != nil {
+		if !first { // wait4 is a steady-state call: not before the first record
+			h.Sweep(live)
+		}
+		// the timeout wakes the loop to sweep orphans that exit while it is idle
+		n, err := unix.EpollWait(ep, evs[:], sweepWaitMs)
+		if err != nil {
 			if err == unix.EINTR {
 				continue
 			}
 			return ExitSetup
+		}
+		if n == 0 {
+			continue
 		}
 		n, _, flags, _, err := unix.Recvmsg(f.Record, buf[:], nil, unix.MSG_TRUNC)
 		if err == unix.EINTR || err == unix.EAGAIN {
@@ -181,8 +280,12 @@ func serve(f Fds, h Host, cfg *Config, limits map[string]string, st *State, live
 			say(f.Status, "N "+svc+"\n")
 			return
 		}
+		if err := h.Reap(l); errors.Is(err, ErrChildRunning) {
+			// still held: the acknowledgement was early, and M_p does not wait on it
+			say(f.Status, "R "+strconv.Itoa(int(ChildRunning))+"\n")
+			return
+		}
 		delete(live, r.Service)
-		_ = h.Reap(l)
 		say(f.Status, "K "+svc+"\n")
 	default: // signals and tree kills belong to the signaller, never to M_p (T11)
 		say(f.Status, "D "+strconv.Itoa(int(r.Kind))+" "+svc+"\n")

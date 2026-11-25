@@ -13,13 +13,16 @@ import (
 )
 
 // Call is one system call a thread of the recorded process tree entered:
-// (thread, number, six arguments), plus the path of an openat(AT_FDCWD, ...) or
-// open(...), which the filter cannot read.
+// (thread, number, six arguments), plus, for a call relative to the working
+// directory (a call that takes a directory descriptor and was given AT_FDCWD,
+// or a call that takes a path alone), the path it names, which the filter
+// cannot read.
 type Call struct {
 	Tid  int
 	Nr   int64
 	Args [6]uint64
-	Path string
+	Cwd  bool   // relative to the working directory
+	Path string // its path; empty when the recorder could not read it
 }
 
 // Recording is what the ptrace recorder saw (7.1.2 item 2).
@@ -51,6 +54,40 @@ func runtimePath(path string) bool {
 		return true
 	}
 	return strings.HasPrefix(path, "/sys/fs/cgroup/") && strings.HasSuffix(path, "/cpu.max")
+}
+
+// dirfdCalls are the calls that take a directory descriptor, with the index of
+// each such argument; the path it qualifies follows it. execve and execveat are
+// not here: the launcher's own exec is judged by the allowed set.
+var dirfdCalls = map[string][]int{
+	"openat": {0}, "openat2": {0}, "mkdirat": {0}, "mknodat": {0}, "unlinkat": {0},
+	"renameat": {0, 2}, "renameat2": {0, 2}, "linkat": {0, 2}, "symlinkat": {1},
+	"fchownat": {0}, "fchmodat": {0}, "fchmodat2": {0}, "newfstatat": {0}, "statx": {0},
+	"faccessat": {0}, "faccessat2": {0}, "readlinkat": {0}, "utimensat": {0},
+	"futimesat": {0}, "name_to_handle_at": {0}, "open_tree": {0}, "move_mount": {0, 2},
+	"mount_setattr": {0}, "fanotify_mark": {3},
+}
+
+// legacyPathCalls are the calls that take a path and no descriptor (amd64): the
+// index of the path argument that is resolved against the working directory.
+var legacyPathCalls = map[string]int{
+	"open": 0, "creat": 0, "stat": 0, "lstat": 0, "access": 0, "mkdir": 0,
+	"rmdir": 0, "unlink": 0, "rename": 0, "link": 0, "symlink": 1, "readlink": 0,
+	"chmod": 0, "chown": 0, "lchown": 0, "truncate": 0, "mknod": 0, "utime": 0,
+	"utimes": 0,
+}
+
+// cwdPathArg says whether a call resolves a path against the working directory
+// (it takes no directory descriptor, or was given AT_FDCWD for one) and, when it
+// does, the index of the argument that holds the path's address.
+func cwdPathArg(name string, args [6]uint64) (int, bool) {
+	for _, i := range dirfdCalls[name] {
+		if uint32(args[i]) == atFdcwd32 {
+			return i + 1, true
+		}
+	}
+	i, ok := legacyPathCalls[name]
+	return i, ok
 }
 
 // culprit picks, among the last calls of the threads a SIGSYS killed, the one
@@ -141,13 +178,16 @@ func Judge(arch string, r *Recording, wantExit int) []string {
 		case steady && n == "prctl" && c.Args[0] == prSetChildSubreaper:
 			fail("dynamic: prctl(PR_SET_CHILD_SUBREAPER) after the first recvmsg (a start-up call)")
 		}
-		switch n {
-		case "tgkill":
-			if uint32(c.Args[0]) != uint32(r.Leader) {
-				fail(fmt.Sprintf("dynamic: tgkill with tgid %d, not svd-monitor's own %d", uint32(c.Args[0]), r.Leader))
-			}
-		case "openat", "open":
-			if c.Path != "" && !runtimePath(c.Path) {
+		if n == "tgkill" && uint32(c.Args[0]) != uint32(r.Leader) {
+			fail(fmt.Sprintf("dynamic: tgkill with tgid %d, not svd-monitor's own %d", uint32(c.Args[0]), r.Leader))
+		}
+		// a call relative to the working directory may open the runtime's own
+		// files and nothing else; a path the recorder could not read is no
+		// exception (runtimePath("") is false)
+		if c.Cwd && !((n == "openat" || n == "open") && runtimePath(c.Path)) {
+			if c.Path == "" {
+				fail(fmt.Sprintf("dynamic: %s(AT_FDCWD) of a path that could not be read", n))
+			} else {
 				fail(fmt.Sprintf("dynamic: %s(AT_FDCWD) of %q", n, c.Path))
 			}
 		}
