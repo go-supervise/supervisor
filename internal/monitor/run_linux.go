@@ -89,10 +89,9 @@ func exited(fd int) (bool, error) {
 // await waits up to reapWaitMs for the pidfd to become readable (its child
 // exited).
 func (h realHost) await(fd int) {
-	if h.ep < 0 {
-		return
-	}
 	ev := unix.EpollEvent{Events: unix.EPOLLIN}
+	// an epoll instance that could not be created (-1) fails here, as a pidfd
+	// epoll cannot watch does: no wait
 	if unix.EpollCtl(h.ep, unix.EPOLL_CTL_ADD, fd, &ev) != nil {
 		return
 	}
@@ -124,9 +123,17 @@ func (h realHost) Reap(l *Live) error {
 }
 
 func (realHost) Sweep(live map[uint32]*Live) {
-	for i := 0; i < maxSweep; i++ {
+	sweep(live, func() (int, error) {
 		var ws unix.WaitStatus
-		pid, err := unix.Wait4(-1, &ws, unix.WNOHANG, nil)
+		return unix.Wait4(-1, &ws, unix.WNOHANG, nil)
+	})
+}
+
+// sweep collects with wait (a non-blocking wait4 of any child) until it finds
+// nothing, at most maxSweep children.
+func sweep(live map[uint32]*Live, wait func() (int, error)) {
+	for i := 0; i < maxSweep; i++ {
+		pid, err := wait()
 		if err == unix.EINTR {
 			continue
 		}
@@ -169,31 +176,44 @@ func readAll(fd int) ([]byte, error) {
 	return nil, ErrConfig
 }
 
+// readConfig reads and parses the configuration from fd.
+func readConfig(fd int) (*Config, error) {
+	b, err := readAll(fd)
+	if err != nil {
+		return nil, err
+	}
+	return ParseConfig(b)
+}
+
+// The system calls of the setup and the wait loop, replaceable by a test that
+// has to make one of them fail.
+var (
+	prctl       = unix.Prctl
+	epollCreate = unix.EpollCreate1
+	epollCtl    = unix.EpollCtl
+	epollWait   = unix.EpollWait
+)
+
 // Run is M_p: it reads its configuration, becomes a subreaper, and serves the
 // records of L_p on f.Record until the peer hangs up (0) or the decoder says
 // Fault (ExitFault). Spawns and reaps go through h; M_p never signals.
 func Run(f Fds, h Host) int {
-	b, err := readAll(f.Config)
+	cfg, err := readConfig(f.Config)
 	if err != nil {
 		say(f.Status, "E config\n")
 		return ExitSetup
 	}
-	cfg, err := ParseConfig(b)
-	if err != nil {
-		say(f.Status, "E config\n")
-		return ExitSetup
-	}
-	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+	if err := prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
 		say(f.Status, "E subreaper\n")
 		return ExitSetup
 	}
-	ep, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
+	ep, err := epollCreate(unix.EPOLL_CLOEXEC)
 	if err != nil {
 		say(f.Status, "E epoll\n")
 		return ExitSetup
 	}
 	ev := unix.EpollEvent{Events: unix.EPOLLIN | unix.EPOLLRDHUP, Fd: int32(f.Record)}
-	if err := unix.EpollCtl(ep, unix.EPOLL_CTL_ADD, f.Record, &ev); err != nil {
+	if err := epollCtl(ep, unix.EPOLL_CTL_ADD, f.Record, &ev); err != nil {
 		say(f.Status, "E epoll\n")
 		return ExitSetup
 	}
@@ -211,7 +231,7 @@ func Run(f Fds, h Host) int {
 			h.Sweep(live)
 		}
 		// the timeout wakes the loop to sweep orphans that exit while it is idle
-		n, err := unix.EpollWait(ep, evs[:], sweepWaitMs)
+		n, err := epollWait(ep, evs[:], sweepWaitMs)
 		if err != nil {
 			if err == unix.EINTR {
 				continue
