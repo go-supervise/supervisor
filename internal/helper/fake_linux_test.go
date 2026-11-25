@@ -35,7 +35,9 @@ type fake struct {
 	srcs    map[string][]byte // credential sources by path
 	srcByFD map[int][]byte
 	srcOff  map[int]int
-	args    map[string][]any // last arguments of an op
+	srcMode map[string]uint32 // file type of a source path (default: regular)
+	fdMode  map[int]uint32    // file type fstat reports for an opened source
+	args    map[string][]any  // last arguments of an op
 
 	treeFD   int    // the fd open_tree handed out
 	mntDelta uint64 // added to the mount id of every fd but the tree's
@@ -47,7 +49,8 @@ func newFake(t *testing.T) *fake {
 	f := &fake{t: t, count: map[string]int{}, failAt: map[string]int{}, open: map[int]bool{}, next: 100,
 		files:   map[string][]byte{"/proc/self/oom_score_adj": []byte("0\n"), SuidDumpablePath: []byte("0\n")},
 		written: map[string][]byte{}, outName: map[int]string{}, srcs: map[string][]byte{},
-		srcByFD: map[int][]byte{}, srcOff: map[int]int{}, args: map[string][]any{}}
+		srcByFD: map[int][]byte{}, srcOff: map[int]int{}, srcMode: map[string]uint32{}, fdMode: map[int]uint32{},
+		args: map[string][]any{}}
 	old := k
 	t.Cleanup(func() { k = old })
 	k = kernelOps{
@@ -65,6 +68,10 @@ func newFake(t *testing.T) *fake {
 				st.Size = int64(len(f.plan))
 				if f.planLen != nil {
 					st.Size = *f.planLen
+				}
+			default:
+				if m, ok := f.fdMode[fd]; ok {
+					st.Mode = m
 				}
 			}
 			return nil
@@ -162,6 +169,10 @@ func newFake(t *testing.T) *fake {
 			fd := f.alloc()
 			if b, ok := f.srcs[path]; ok {
 				f.srcByFD[fd] = b
+				f.fdMode[fd] = unix.S_IFREG
+			}
+			if m, ok := f.srcMode[path]; ok {
+				f.fdMode[fd] = m
 			}
 			return fd, nil
 		},

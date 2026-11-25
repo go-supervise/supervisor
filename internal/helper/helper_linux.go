@@ -101,7 +101,7 @@ func run() error {
 // h1: close_range(k, ~0, CLOEXEC); fd 0 is /dev/null, fds 1 and 2 are the
 // log pipe, getsid(0) == getpid(), no controlling terminal.
 func h1() error {
-	if e := k.closeRange(fdlayout.HelperFD, ^uintptr(0)>>32, unix.CLOSE_RANGE_CLOEXEC); e != nil {
+	if e := k.closeRange(fdlayout.HelperFD, closeRangeLast, unix.CLOSE_RANGE_CLOEXEC); e != nil {
 		return fail("H1 close_range", fdlayout.ExitH1, e)
 	}
 	var st, s1, s2 unix.Stat_t
@@ -221,10 +221,20 @@ func h7(p *Plan) error {
 			return fail("H7 name", fdlayout.ExitH7, fmt.Errorf("bad credential name %q", c.Name))
 		}
 		h := *how
-		h.Flags = unix.O_RDONLY | unix.O_CLOEXEC
+		// O_NONBLOCK: opening a FIFO must not wait for a writer
+		h.Flags = unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NONBLOCK
 		fd, err := k.openat2(unix.AT_FDCWD, c.Source, &h)
 		if err != nil {
 			return fail("H7 open", fdlayout.ExitH7, err)
+		}
+		var st unix.Stat_t
+		if err := k.fstat(fd, &st); err != nil {
+			k.close(fd)
+			return fail("H7 source", fdlayout.ExitH7, err)
+		}
+		if st.Mode&unix.S_IFMT != unix.S_IFREG {
+			k.close(fd)
+			return fail("H7 source", fdlayout.ExitH7, fmt.Errorf("credential source %q is not a regular file", c.Source))
 		}
 		srcs = append(srcs, fd)
 	}
@@ -313,7 +323,12 @@ func h8() error {
 
 // h9: the working directory as an O_PATH fd, and the sealed frame.
 func h9(p *Plan) (cwd, frameFD int, err error) {
-	cwd, err = k.open(p.Cwd, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	// the working directory is the plan's own path: a symbolic link anywhere in
+	// it would send the service somewhere the plan did not name
+	cwd, err = k.openat2(unix.AT_FDCWD, p.Cwd, &unix.OpenHow{
+		Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
+	})
 	if err != nil {
 		return 0, 0, fail("H9 cwd", fdlayout.ExitH9, err)
 	}
@@ -370,7 +385,7 @@ func h10(p *Plan, cwd, frameFD int, regions []int) error {
 		}
 	}
 	stage := parked[4]
-	if e := k.closeRange(uintptr(fdlayout.StageFirstFree+len(regions)), ^uintptr(0)>>32, unix.CLOSE_RANGE_CLOEXEC); e != nil {
+	if e := k.closeRange(uintptr(fdlayout.StageFirstFree+len(regions)), closeRangeLast, unix.CLOSE_RANGE_CLOEXEC); e != nil {
 		return fail("H10 close_range", fdlayout.ExitH10, e)
 	}
 	// The stage and the parked copies are CLOEXEC; the stage fd is still

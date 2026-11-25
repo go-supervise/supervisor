@@ -21,10 +21,10 @@ import (
 
 func TestRealKernelWrappers(t *testing.T) {
 	// An empty range closes nothing; bad flags are refused.
-	if err := closeRange(1<<30, ^uintptr(0)>>32, unix.CLOSE_RANGE_CLOEXEC); err != nil {
+	if err := closeRange(1<<30, closeRangeLast, unix.CLOSE_RANGE_CLOEXEC); err != nil {
 		t.Errorf("close_range of an empty range: %v", err)
 	}
-	if err := closeRange(1<<30, ^uintptr(0)>>32, 1<<20); err != unix.EINVAL {
+	if err := closeRange(1<<30, closeRangeLast, 1<<20); err != unix.EINVAL {
 		t.Errorf("close_range with bad flags = %v, want EINVAL", err)
 	}
 	// execveat never returns on success: with a bad fd the return is the error.
@@ -118,7 +118,7 @@ func TestH1Faults(t *testing.T) {
 		if err := h1(); err != nil {
 			t.Fatal(err)
 		}
-		if got := f.args["close_range"]; !reflect.DeepEqual(got, []any{uintptr(fdlayout.HelperFD), ^uintptr(0) >> 32, uintptr(unix.CLOSE_RANGE_CLOEXEC)}) {
+		if got := f.args["close_range"]; !reflect.DeepEqual(got, []any{uintptr(fdlayout.HelperFD), closeRangeLast, uintptr(unix.CLOSE_RANGE_CLOEXEC)}) {
 			t.Errorf("close_range args %v: from k, CLOEXEC, never flag 0", got)
 		}
 	})
@@ -327,7 +327,8 @@ func TestH7Delivers(t *testing.T) {
 		t.Errorf("create args %v", got)
 	}
 	rs := uint64(unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS)
-	want := []any{"/s/a", uint64(unix.O_RDONLY | unix.O_CLOEXEC), rs, "/s/b", uint64(unix.O_RDONLY | unix.O_CLOEXEC), rs,
+	src := uint64(unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NONBLOCK)
+	want := []any{"/s/a", src, rs, "/s/b", src, rs,
 		"/d", uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC), rs}
 	if got := f.args["openat2"]; !reflect.DeepEqual(got, want) {
 		t.Errorf("openat2 args %v", got)
@@ -351,6 +352,30 @@ func TestH7Delivers(t *testing.T) {
 	if err := h7(testPlan(ModeService)); err != nil || len(f.calls) != 0 {
 		t.Errorf("no credentials: err %v calls %v", err, f.calls)
 	}
+}
+
+// A credential source must be a regular file: a FIFO would block the read, a
+// device or directory is not a secret. fstat decides, on the descriptor opened.
+func TestH7RefusesASourceThatIsNotARegularFile(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		mode uint32
+	}{{"fifo", unix.S_IFIFO}, {"char device", unix.S_IFCHR}, {"directory", unix.S_IFDIR}, {"socket", unix.S_IFSOCK}} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake(t)
+			f.srcs["/s/a"], f.srcs["/s/b"] = []byte("x"), []byte("y")
+			f.srcMode["/s/b"] = c.mode
+			wantStep(t, h7(credPlan()), "H7 source", fdlayout.ExitH7)
+			f.noLeak(t)
+		})
+	}
+	t.Run("fstat fails", func(t *testing.T) {
+		f := newFake(t)
+		f.srcs["/s/a"], f.srcs["/s/b"] = []byte("x"), []byte("y")
+		f.failAt["fstat"] = 1
+		wantStep(t, h7(credPlan()), "H7 source", fdlayout.ExitH7)
+		f.noLeak(t)
+	})
 }
 
 func TestH8(t *testing.T) {
@@ -397,7 +422,7 @@ func TestH9(t *testing.T) {
 		set  func(f *fake, p *Plan)
 		step string
 	}{
-		{"cwd", func(f *fake, p *Plan) { f.failAt["open"] = 1 }, "H9 cwd"},
+		{"cwd", func(f *fake, p *Plan) { f.failAt["openat2"] = 1 }, "H9 cwd"},
 		{"encode", func(f *fake, p *Plan) { p.Frame.Groups = make([]uint32, 65) }, "H9 encode"},
 		{"memfd", func(f *fake, p *Plan) { f.failAt["memfd"] = 1 }, "H9 memfd"},
 		{"write", func(f *fake, p *Plan) { f.failAt["write"] = 1 }, "H9 write"},
@@ -421,7 +446,8 @@ func TestH9(t *testing.T) {
 	if err != nil || cwd == fr || !f.open[cwd] || !f.open[fr] {
 		t.Fatalf("cwd %d frame %d err %v", cwd, fr, err)
 	}
-	if got := f.args["open"]; !reflect.DeepEqual(got, []any{"/w", unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC}) {
+	if got := f.args["openat2"]; !reflect.DeepEqual(got, []any{"/w", uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC),
+		uint64(unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS)}) {
 		t.Errorf("cwd open %v", got)
 	}
 	if got := f.args["memfd"]; !reflect.DeepEqual(got, []any{"svd-frame", unix.MFD_CLOEXEC | unix.MFD_ALLOW_SEALING | unix.MFD_NOEXEC_SEAL}) {
@@ -516,7 +542,7 @@ func TestH10(t *testing.T) {
 		if got := f.args["dup3"]; !reflect.DeepEqual(got, wantDup) {
 			t.Errorf("dup3 %v, want %v", got, wantDup)
 		}
-		if got := f.args["close_range"]; !reflect.DeepEqual(got, []any{uintptr(fdlayout.StageFirstFree), ^uintptr(0) >> 32, uintptr(unix.CLOSE_RANGE_CLOEXEC)}) {
+		if got := f.args["close_range"]; !reflect.DeepEqual(got, []any{uintptr(fdlayout.StageFirstFree), closeRangeLast, uintptr(unix.CLOSE_RANGE_CLOEXEC)}) {
 			t.Errorf("close_range %v", got)
 		}
 	})
@@ -529,6 +555,9 @@ func TestRunSequenceAndRefusals(t *testing.T) {
 			f := newFake(t)
 			pl := credPlan()
 			pl.Mode = m
+			if m == ModeSignal {
+				pl.Creds, pl.CredDir = nil, "" // a signal-mode plan carries none
+			}
 			f.srcs["/s/a"], f.srcs["/s/b"] = []byte("x"), []byte("y")
 			f.plan, _ = pl.Marshal()
 			err := safeRun(t)
@@ -564,7 +593,7 @@ func TestRunSequenceAndRefusals(t *testing.T) {
 		{"H5", ModeService, func(f *fake) { f.failAt["mount"] = 1 }, fdlayout.ExitH5},
 		{"H7", ModeService, func(f *fake) { f.failAt["openat2"] = 1 }, fdlayout.ExitH7},
 		{"H8", ModeLane, func(f *fake) { f.failAt["chdir"] = 1 }, fdlayout.ExitH8},
-		{"H9", ModeService, func(f *fake) { f.failAt["open"] = 1 }, fdlayout.ExitH9},
+		{"H9", ModeService, func(f *fake) { f.failAt["openat2"] = 4 }, fdlayout.ExitH9}, // after H7's three
 		{"H10", ModeService, func(f *fake) {}, fdlayout.ExitH10},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -596,12 +625,14 @@ func TestRunSequenceAndRefusals(t *testing.T) {
 	})
 	t.Run("signal mode skips H4, H5, H7 and never reads the credentials", func(t *testing.T) {
 		f := newFake(t)
-		pl := credPlan()
-		pl.Mode = ModeSignal
+		pl := testPlan(ModeSignal)
 		pl.Regions = []Region{{Path: "/srv/r", ReadOnly: true}} // H6 is skipped too
-		f.plan, _ = pl.Marshal()
+		var err error
+		if f.plan, err = pl.Marshal(); err != nil {
+			t.Fatal(err)
+		}
 		f.files[SuidDumpablePath] = []byte("1")
-		f.failAt["mount"], f.failAt["openat2"] = 1, 1
+		f.failAt["mount"] = 1
 		wantStep(t, safeRun(t), "H10 exec", fdlayout.ExitH10)
 	})
 }

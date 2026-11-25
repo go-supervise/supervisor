@@ -34,6 +34,14 @@ func TestPlanRefusals(t *testing.T) {
 		"no stage":     func(p *Plan) { p.StageArgv = nil },
 		"no cwd":       func(p *Plan) { p.Cwd = "" },
 		"creds no dir": func(p *Plan) { p.Creds = []Credential{{Name: "a", Source: "/s"}} },
+		"relative cwd": func(p *Plan) { p.Cwd = "w" },
+		"relative dir": func(p *Plan) { p.CredDir = "d"; p.Creds = []Credential{{Name: "a", Source: "/s"}} },
+		"relative src": func(p *Plan) { p.CredDir = "/d"; p.Creds = []Credential{{Name: "a", Source: "s"}} },
+		"empty src":    func(p *Plan) { p.CredDir = "/d"; p.Creds = []Credential{{Name: "a"}} },
+		"signal creds": func(p *Plan) {
+			p.Mode, p.CredDir, p.Creds = ModeSignal, "/d", []Credential{{Name: "a", Source: "/s"}}
+		},
+		"signal dir": func(p *Plan) { p.Mode, p.CredDir = ModeSignal, "/d" },
 	} {
 		p := goodPlan()
 		mut(p)

@@ -65,8 +65,8 @@ func (p *Plan) Validate() error {
 	if len(p.StageArgv) == 0 {
 		return errors.New("helper: empty stage argv")
 	}
-	if p.Cwd == "" {
-		return errors.New("helper: empty cwd")
+	if p.Cwd == "" || p.Cwd[0] != '/' {
+		return fmt.Errorf("helper: cwd %q is not absolute", p.Cwd)
 	}
 	if len(p.Regions) > MaxRegions {
 		return fmt.Errorf("helper: %d regions, at most %d", len(p.Regions), MaxRegions)
@@ -76,8 +76,19 @@ func (p *Plan) Validate() error {
 			return fmt.Errorf("helper: region path %q is not absolute", r.Path)
 		}
 	}
+	if p.Mode == ModeSignal && (len(p.Creds) > 0 || p.CredDir != "") {
+		return errors.New("helper: a signal-mode plan carries no credentials")
+	}
 	if len(p.Creds) > 0 && p.CredDir == "" {
 		return errors.New("helper: credentials without a delivery directory")
+	}
+	if p.CredDir != "" && p.CredDir[0] != '/' {
+		return fmt.Errorf("helper: delivery directory %q is not absolute", p.CredDir)
+	}
+	for _, c := range p.Creds {
+		if c.Source == "" || c.Source[0] != '/' {
+			return fmt.Errorf("helper: credential source %q is not absolute", c.Source)
+		}
 	}
 	return nil
 }

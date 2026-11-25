@@ -18,6 +18,8 @@ type fakeHost struct {
 	reaps   []Live
 	failing bool
 	pid     int
+	running int // reaps that find the child still running
+	sweeps  int
 }
 
 func (h *fakeHost) Start(c *spawn.Config) (*spawn.Child, error) {
@@ -30,8 +32,14 @@ func (h *fakeHost) Start(c *spawn.Config) (*spawn.Child, error) {
 
 func (h *fakeHost) Reap(l *Live) error {
 	h.reaps = append(h.reaps, *l)
+	if h.running > 0 {
+		h.running--
+		return ErrChildRunning
+	}
 	return nil
 }
+
+func (h *fakeHost) Sweep(live map[uint32]*Live) { h.sweeps++ }
 
 type rig struct {
 	t      *testing.T
@@ -166,6 +174,29 @@ func TestRunRefusesASpawnForALiveService(t *testing.T) {
 	}
 	if len(h.starts) != 2 || len(h.reaps) != 1 {
 		t.Fatalf("starts %d reaps %d, want 2 and 1", len(h.starts), len(h.reaps))
+	}
+}
+
+// An acknowledgement for a child that is still running is refused and the child
+// stays held (its service cannot be respawned); a later acknowledgement reaps it.
+// M_p sweeps the subreaper's children as it serves.
+func TestRunKeepsAChildThatIsStillRunning(t *testing.T) {
+	r := newRig(t, baseConfig().Marshal())
+	h := &fakeHost{pid: 4242, running: 1}
+	r.send(rc(rec(KindSpawn, 0, 1, 0, 1, 7)))
+	r.send(rc(rec(KindReapAck, 0, 1, 0, 2, 7))) // still running
+	r.send(rc(rec(KindSpawn, 0, 2, 0, 3, 7)))   // still held
+	r.send(rc(rec(KindReapAck, 0, 1, 0, 4, 7))) // gone now
+	r.hangUp()
+	if got := Run(r.fds, h); got != ExitOK {
+		t.Fatalf("exit %d", got)
+	}
+	want := "S 0 4242\nR " + strconv.Itoa(int(ChildRunning)) + "\nR " + strconv.Itoa(int(ServiceLive)) + "\nK 0\n"
+	if got := r.statusText(); got != want {
+		t.Fatalf("status %q, want %q", got, want)
+	}
+	if h.sweeps == 0 {
+		t.Fatal("the loop never swept the subreaper's children")
 	}
 }
 
