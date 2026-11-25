@@ -1,6 +1,8 @@
 package surface
 
 import (
+	"bytes"
+	"debug/dwarf"
 	"debug/elf"
 	"os"
 	"os/exec"
@@ -107,6 +109,65 @@ func TestSymbolAbsenceSeesAnInlinedFunction(t *testing.T) {
 	}
 	if !reflect.DeepEqual(r.Failures, want) {
 		t.Fatalf("failures %v, want %v", r.Failures, want)
+	}
+}
+
+// Debug information that does not parse is an error, never a shorter list of
+// names: a half-read table would pass a binary whose offending subprogram sits
+// in the part that was not read.
+func TestSymbolAbsenceRefusesDebugInformationItCannotParse(t *testing.T) {
+	bin := build(t, fixPkg+"ok", "-ldflags=-compressdwarf=false")
+	b, err := os.ReadFile(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := elf.NewFile(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := f.Section(".debug_info")
+	if s == nil || s.Type == elf.SHT_NOBITS {
+		t.Fatal("no .debug_info section")
+	}
+	// the first unit's header stays, its first entry becomes an abbreviation
+	// code that never ends: the reader opens and then fails on the first read
+	for i := s.Offset + 12; i < s.Offset+44; i++ {
+		b[i] = 0xff
+	}
+	bad := filepath.Join(t.TempDir(), "bad")
+	if err := os.WriteFile(bad, b, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SymbolAbsence(bad); err == nil {
+		t.Fatal("unparsable debug information is not a pass")
+	} else if !strings.Contains(err.Error(), "reading debug information") {
+		t.Errorf("error does not name the debug information: %v", err)
+	}
+}
+
+func TestDwarfFunctionsReportsAParseError(t *testing.T) {
+	bin := build(t, fixPkg+"ok", "-ldflags=-compressdwarf=false")
+	f, err := elf.Open(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	d, err := f.DWARF()
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := map[string]bool{}
+	if err := dwarfFunctions(d, have); err != nil || !have["main.main"] {
+		t.Fatalf("a whole table: %v, main.main %v", err, have["main.main"])
+	}
+	// units whose DIEs name an abbreviation the table does not hold
+	info := []byte{8, 0, 0, 0, 4, 0, 0, 0, 0, 0, 8, 0x7f}
+	bad, err := dwarf.New([]byte{0}, nil, nil, info, nil, nil, nil, nil)
+	if err != nil {
+		t.Skipf("the reader refuses it before reading: %v", err)
+	}
+	if err := dwarfFunctions(bad, map[string]bool{}); err == nil {
+		t.Error("a table that does not parse was read as complete")
 	}
 }
 

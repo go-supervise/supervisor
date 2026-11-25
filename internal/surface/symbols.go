@@ -5,7 +5,6 @@ import (
 	"debug/elf"
 	"errors"
 	"fmt"
-	"io"
 )
 
 // SymbolAbsence is half 3 of 7.1.2: neither the ELF symbol table nor the debug
@@ -44,10 +43,7 @@ func SymbolAbsence(path string) (*Result, error) {
 func dwarfFunctions(d *dwarf.Data, have map[string]bool) error {
 	r := d.Reader()
 	for {
-		e, err := r.Next()
-		if err == io.EOF {
-			return nil
-		}
+		e, err := r.Next() // (nil, nil) marks the end
 		if err != nil {
 			return err
 		}

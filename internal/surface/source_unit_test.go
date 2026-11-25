@@ -47,6 +47,17 @@ func TestSourceHalfRefusesAnotherToolchain(t *testing.T) {
 	}
 }
 
+func TestSourceHalfRefusesAnotherBuildEnvironment(t *testing.T) {
+	was, wasEnv := goVersionOf, goEnvOf
+	defer func() { goVersionOf, goEnvOf = was, wasEnv }()
+	goVersionOf = func(string, []string) (string, error) { return "go1.27.0", nil }
+	goEnvOf = func(string, []string, string) (string, error) { return "-race", nil }
+	_, err := SourceHalf(Options{Dir: "../..", Entry: fixPkg + "ok", GOARCH: "amd64"})
+	if err == nil || !strings.Contains(err.Error(), "GOFLAGS") {
+		t.Errorf("a build under extra flags: %v", err)
+	}
+}
+
 func TestSourceHalfReportsADriverFailure(t *testing.T) {
 	was, wasEnv := goVersionOf, goEnvOf
 	defer func() { goVersionOf, goEnvOf = was, wasEnv }()
