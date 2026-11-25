@@ -143,7 +143,10 @@ var rawDirfd = map[string][]int{
 	"readlinkat": {0}, "symlinkat": {1}, "linkat": {0, 2}, "renameat": {0, 2},
 	"renameat2": {0, 2}, "faccessat": {0}, "faccessat2": {0}, "utimensat": {0},
 	"futimesat": {0}, "execveat": {0}, "name_to_handle_at": {0}, "open_tree": {0},
-	"move_mount": {0, 2}, "mount_setattr": {0}, "fstatat": {0},
+	"move_mount": {0, 2}, "mount_setattr": {0}, "fspick": {0}, "fstatat": {0},
+	"fanotify_mark": {3}, "open_by_handle_at": {0}, "open_tree_attr": {0},
+	"setxattrat": {0}, "getxattrat": {0}, "listxattrat": {0}, "removexattrat": {0},
+	"file_getattr": {0}, "file_setattr": {0},
 }
 
 // isFdcwd says whether v is the constant AT_FDCWD (-100), as a signed value or
