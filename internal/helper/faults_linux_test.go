@@ -373,6 +373,16 @@ func TestH7RefusesASourceThatIsNotARegularFile(t *testing.T) {
 		f := newFake(t)
 		f.srcs["/s/a"], f.srcs["/s/b"] = []byte("x"), []byte("y")
 		f.failAt["fstat"] = 1
+		// a failed fstat that still leaves a regular-file mode behind: only the
+		// error itself can refuse the source, not the type check after it
+		orig := k.fstat
+		k.fstat = func(fd int, st *unix.Stat_t) error {
+			err := orig(fd, st)
+			if err != nil {
+				st.Mode = unix.S_IFREG
+			}
+			return err
+		}
 		wantStep(t, h7(credPlan()), "H7 source", fdlayout.ExitH7)
 		f.noLeak(t)
 	})

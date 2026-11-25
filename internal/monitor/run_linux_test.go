@@ -129,7 +129,7 @@ func TestRunServesTheWholeVocabulary(t *testing.T) {
 	r.send(rc(rec(KindKillTree, 1, 0, 0, 7, 7)))
 	r.send(rc(rec(KindSignalTree, 0, 1, 15, 8, 7)))
 	r.hangUp()
-	if got := Run(r.fds, h); got != ExitOK {
+	if got := runBounded(t, r.fds, h); got != ExitOK {
 		t.Fatalf("exit %d", got)
 	}
 	want := "S 0 4242\nD 2 0\nK 0\nN 0\n" +
@@ -165,7 +165,7 @@ func TestRunRefusesASpawnForALiveService(t *testing.T) {
 	r.send(rc(rec(KindReapAck, 0, 1, 0, 3, 7)))
 	r.send(rc(rec(KindSpawn, 0, 2, 0, 4, 7))) // the same epoch again: nothing was consumed
 	r.hangUp()
-	if got := Run(r.fds, h); got != ExitOK {
+	if got := runBounded(t, r.fds, h); got != ExitOK {
 		t.Fatalf("exit %d", got)
 	}
 	want := "S 0 4242\nR " + strconv.Itoa(int(ServiceLive)) + "\nK 0\nS 0 4242\n"
@@ -188,7 +188,7 @@ func TestRunKeepsAChildThatIsStillRunning(t *testing.T) {
 	r.send(rc(rec(KindSpawn, 0, 2, 0, 3, 7)))   // still held
 	r.send(rc(rec(KindReapAck, 0, 1, 0, 4, 7))) // gone now
 	r.hangUp()
-	if got := Run(r.fds, h); got != ExitOK {
+	if got := runBounded(t, r.fds, h); got != ExitOK {
 		t.Fatalf("exit %d", got)
 	}
 	want := "S 0 4242\nR " + strconv.Itoa(int(ChildRunning)) + "\nR " + strconv.Itoa(int(ServiceLive)) + "\nK 0\n"
@@ -206,7 +206,7 @@ func TestRunReportsAFailedSpawn(t *testing.T) {
 	r.send(rc(rec(KindSpawn, 1, 1, 0, 1, 7)))
 	r.send(rc(rec(KindReapAck, 1, 1, 0, 2, 7)))
 	r.hangUp()
-	if got := Run(r.fds, h); got != ExitOK {
+	if got := runBounded(t, r.fds, h); got != ExitOK {
 		t.Fatalf("exit %d", got)
 	}
 	if got := r.statusText(); got != "F 1\nN 1\n" {
@@ -241,7 +241,7 @@ func TestRunStopsOnAFault(t *testing.T) {
 			h := &fakeHost{pid: 1}
 			c.send(r)
 			r.send(rc(rec(KindSpawn, 0, 1, 0, 1, 7))) // never served after the fault
-			if got := Run(r.fds, h); got != ExitFault {
+			if got := runBounded(t, r.fds, h); got != ExitFault {
 				t.Fatalf("exit %d", got)
 			}
 			if got, want := r.statusText(), "X "+strconv.Itoa(int(c.why))+"\n"; got != want {
@@ -259,7 +259,7 @@ func TestRunRefusesABadConfiguration(t *testing.T) {
 	for name, cfg := range map[string][]byte{"empty": nil, "garbage": {1, 2, 3}, "oversized": big} {
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t, cfg)
-			if got := Run(r.fds, &fakeHost{}); got != ExitSetup {
+			if got := runBounded(t, r.fds, &fakeHost{}); got != ExitSetup {
 				t.Fatalf("exit %d", got)
 			}
 			if got := r.statusText(); got != "E config\n" {
@@ -272,7 +272,7 @@ func TestRunRefusesABadConfiguration(t *testing.T) {
 func TestRunRefusesAnUnreadableConfigFd(t *testing.T) {
 	r := newRig(t, nil)
 	r.fds.Config = -1
-	if got := Run(r.fds, &fakeHost{}); got != ExitSetup {
+	if got := runBounded(t, r.fds, &fakeHost{}); got != ExitSetup {
 		t.Fatalf("exit %d", got)
 	}
 	if got := r.statusText(); got != "E config\n" {
@@ -283,7 +283,7 @@ func TestRunRefusesAnUnreadableConfigFd(t *testing.T) {
 func TestRunRefusesARecordFdEpollCannotWatch(t *testing.T) {
 	r := newRig(t, baseConfig().Marshal())
 	r.fds.Record = -1
-	if got := Run(r.fds, &fakeHost{}); got != ExitSetup {
+	if got := runBounded(t, r.fds, &fakeHost{}); got != ExitSetup {
 		t.Fatalf("exit %d", got)
 	}
 	if got := r.statusText(); got != "E epoll\n" {
@@ -303,7 +303,7 @@ func TestRunRefusesARecordFdThatIsNotASocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.fds.Record = p[0]
-	if got := Run(r.fds, &fakeHost{}); got != ExitSetup {
+	if got := runBounded(t, r.fds, &fakeHost{}); got != ExitSetup {
 		t.Fatalf("exit %d", got)
 	}
 	if got := r.statusText(); got != "E recv\n" {
@@ -311,11 +311,34 @@ func TestRunRefusesARecordFdThatIsNotASocket(t *testing.T) {
 	}
 }
 
+func TestReadAllStopsAtTheEndOfTheInput(t *testing.T) {
+	fd := memfd(t, []byte("abc"))
+	bounded(t, func() {
+		if b, err := readAll(fd); err != nil || string(b) != "abc" {
+			t.Errorf("readAll = %q, %v", b, err)
+		}
+	})
+	bounded(t, func() {
+		if _, err := readAll(-1); err == nil {
+			t.Error("a closed descriptor read without error")
+		}
+	})
+	// readConfig answers with the read's own error, not the parser's
+	bounded(t, func() {
+		if _, err := readConfig(-1); !errors.Is(err, unix.EBADF) {
+			t.Errorf("readConfig(-1) = %v, want EBADF", err)
+		}
+	})
+}
+
 func TestReadAllBound(t *testing.T) {
-	if _, err := readAll(memfd(t, make([]byte, maxCfgRead))); err != nil {
-		t.Fatalf("a configuration of exactly the bound: %v", err)
-	}
-	if _, err := readAll(memfd(t, make([]byte, maxCfgRead+1))); !errors.Is(err, ErrConfig) {
-		t.Fatalf("one byte over: %v", err)
-	}
+	exact, over := memfd(t, make([]byte, maxCfgRead)), memfd(t, make([]byte, maxCfgRead+1))
+	bounded(t, func() {
+		if _, err := readAll(exact); err != nil {
+			t.Errorf("a configuration of exactly the bound: %v", err)
+		}
+		if _, err := readAll(over); !errors.Is(err, ErrConfig) {
+			t.Errorf("one byte over: %v", err)
+		}
+	})
 }

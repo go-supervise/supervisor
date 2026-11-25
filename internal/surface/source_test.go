@@ -131,6 +131,7 @@ func TestSourceHalfRefusesWhatItCouldNotSee(t *testing.T) {
 		{"cloneset", []string{`Cloneflags is used other than by a store at ` + fixDir + `cloneset/main.go:`}},
 		{"clonetwo", []string{`Cloneflags is used other than by a single store at ` + fixDir + `clonetwo/main.go:`}},
 		// a raw system call receives AT_FDCWD as the wrappers do
+		{"rawfanotify", []string{`fanotify_mark with AT_FDCWD at ` + fixDir + `rawfanotify/main.go:`}},
 		{"rawfdcwd", []string{`mkdirat with AT_FDCWD at ` + fixDir + `rawfdcwd/main.go:`}},
 	}
 	for _, c := range cases {
