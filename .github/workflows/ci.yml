@@ -79,7 +79,7 @@ jobs:
           docker run --rm --privileged
           -e GOFLAGS=-buildvcs=false
           -v "$PWD:/src" -w /src golang:1.27
-          sh -c 'go build -o /tmp/ss ./cmd/syscallsurface && go build -o /tmp/ref ./internal/surface/refprog && go build -ldflags=-X=runtime.godebugDefault=asyncpreemptoff=1 -o /tmp/stub ./internal/surface/stubhelper && /tmp/ss rgo --arch $(go env GOARCH)--refprog /tmp/ref --stub /tmp/stub --out /tmp/rgo.txt; cat /tmp/rgo.txt'
+          sh -c 'go build -o /tmp/ss ./cmd/syscallsurface && go build -o /tmp/ref ./internal/surface/refprog && go build -ldflags=-X=runtime.godebugDefault=asyncpreemptoff=1 -o /tmp/stub ./internal/surface/stubhelper && /tmp/ss rgo --arch $(go env GOARCH) --refprog /tmp/ref --stub /tmp/stub --out /tmp/rgo.txt; cat /tmp/rgo.txt'
       - name: spawn and helper tests as root
         run: >
           docker run --rm --privileged
