@@ -1,9 +1,12 @@
 package surface
 
 import (
+	"errors"
 	"go/version"
+	"os"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"testing"
@@ -29,6 +32,83 @@ func TestCheckToolchainRefusesAnotherToolchain(t *testing.T) {
 	}
 	if err := CheckToolchain("go1.27.4", "riscv64"); err == nil || !strings.Contains(err.Error(), "no toolchain stamp") {
 		t.Errorf("an architecture with no table: %v", err)
+	}
+}
+
+func TestCheckBuildEnvRefusesExtraFlagsAndExperiments(t *testing.T) {
+	env := os.Environ()
+	t.Setenv("GOFLAGS", "")
+	t.Setenv("GOEXPERIMENT", "")
+	if err := checkBuildEnv(".", env); err != nil {
+		t.Fatalf("an empty environment: %v", err)
+	}
+	t.Setenv("GOFLAGS", "-mod=mod")
+	if err := checkBuildEnv(".", os.Environ()); err == nil || !strings.Contains(err.Error(), "GOFLAGS") {
+		t.Errorf("GOFLAGS set in the environment: %v", err)
+	}
+	t.Setenv("GOFLAGS", "-buildvcs=false")
+	if err := checkBuildEnv(".", os.Environ()); err != nil {
+		t.Errorf("-buildvcs=false changes no code: %v", err)
+	}
+	t.Setenv("GOFLAGS", "")
+	old := goEnvOf
+	defer func() { goEnvOf = old }()
+	for _, k := range []string{"GOFLAGS", "GOEXPERIMENT"} {
+		goEnvOf = func(_ string, _ []string, key string) (string, error) {
+			if key == k {
+				return "x", nil
+			}
+			return "", nil
+		}
+		if err := checkBuildEnv(".", nil); err == nil || !strings.Contains(err.Error(), k) {
+			t.Errorf("%s set: %v", k, err)
+		}
+	}
+	goEnvOf = func(string, []string, string) (string, error) { return "", errors.New("no go") }
+	if err := checkBuildEnv(".", nil); err == nil {
+		t.Error("an unreadable environment is not a pass")
+	}
+}
+
+func TestCheckBuildInfoRefusesAnotherBuild(t *testing.T) {
+	o := Options{GOARCH: "amd64", Tags: []string{"canary_new"}}
+	good := func(edit map[string]string) *debug.BuildInfo {
+		m := map[string]string{"CGO_ENABLED": "0", "GOARCH": "amd64", "GOOS": "linux", "-tags": "canary_new"}
+		for k, v := range edit {
+			m[k] = v
+		}
+		bi := &debug.BuildInfo{}
+		for k, v := range m {
+			bi.Settings = append(bi.Settings, debug.BuildSetting{Key: k, Value: v})
+		}
+		return bi
+	}
+	if err := CheckBuildInfo(good(nil), o); err != nil {
+		t.Fatalf("the analysed build: %v", err)
+	}
+	if err := CheckBuildInfo(nil, o); err == nil {
+		t.Error("no build information accepted")
+	}
+	for name, edit := range map[string]map[string]string{
+		"cgo":        {"CGO_ENABLED": "1"},
+		"arch":       {"GOARCH": "arm64"},
+		"os":         {"GOOS": "darwin"},
+		"tags":       {"-tags": "canary_never"},
+		"experiment": {"GOEXPERIMENT": "simd"},
+		"gcflags":    {"-gcflags": "all=-N"},
+		"ldflags":    {"-ldflags": "-s"},
+		"asmflags":   {"-asmflags": "-D x"},
+		"race":       {"-race": "true"},
+		"msan":       {"-msan": "true"},
+		"asan":       {"-asan": "true"},
+		"cover":      {"-cover": "true"},
+	} {
+		if err := CheckBuildInfo(good(edit), o); err == nil {
+			t.Errorf("%s: a differently built binary accepted", name)
+		}
+	}
+	if err := CheckBuildInfo(good(map[string]string{"-race": "false"}), o); err != nil {
+		t.Errorf("-race=false is the default: %v", err)
 	}
 }
 

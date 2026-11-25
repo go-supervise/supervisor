@@ -1,6 +1,7 @@
 package surface
 
 import (
+	"debug/elf"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,6 +75,41 @@ func TestSymbolAbsenceOnBinaries(t *testing.T) {
 	}
 }
 
+// A function the compiler inlined everywhere has no symbol, only the debug
+// information that names it: the absence is judged on both.
+func TestSymbolAbsenceSeesAnInlinedFunction(t *testing.T) {
+	bin := build(t, fixPkg+"inlined")
+	f, err := elf.Open(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	syms, err := f.Symbols()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range syms {
+		if s.Name == "golang.org/x/sys/unix.Setuid" {
+			t.Fatal("the compiler kept an out-of-line copy: the fixture inlines nothing")
+		}
+	}
+	r, err := SymbolAbsence(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// syscall.Setuid is the callee the inlined body leaves linked, and it
+	// pulls the all-threads machinery in with it.
+	want := []string{
+		"symbols: syscall.AllThreadsSyscall is linked into svd-monitor",
+		"symbols: syscall.runtime_doAllThreadsSyscall is linked into svd-monitor",
+		"symbols: syscall.Setuid is linked into svd-monitor",
+		"symbols: golang.org/x/sys/unix.Setuid is linked into svd-monitor",
+	}
+	if !reflect.DeepEqual(r.Failures, want) {
+		t.Fatalf("failures %v, want %v", r.Failures, want)
+	}
+}
+
 func TestSymbolAbsenceRefusesWhatItCannotRead(t *testing.T) {
 	noPanic(t, "a missing file", func() {
 		if _, err := SymbolAbsence(filepath.Join(t.TempDir(), "missing")); !os.IsNotExist(err) {
@@ -90,5 +126,10 @@ func TestSymbolAbsenceRefusesWhatItCannotRead(t *testing.T) {
 	_, err := SymbolAbsence(build(t, fixPkg+"ok", "-ldflags=-s -w"))
 	if err == nil || !strings.Contains(err.Error(), "no symbol table") {
 		t.Fatalf("a stripped binary is not a pass: %v", err)
+	}
+	// symbols kept, debug information dropped: an inlined function would hide
+	_, err = SymbolAbsence(build(t, fixPkg+"ok", "-ldflags=-w"))
+	if err == nil || !strings.Contains(err.Error(), "no debug information") {
+		t.Fatalf("a binary without DWARF is not a pass: %v", err)
 	}
 }

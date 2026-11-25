@@ -169,6 +169,9 @@ func SourceHalf(o Options) (*Result, error) {
 	if err := CheckToolchain(built, o.GOARCH); err != nil {
 		return nil, err
 	}
+	if err := checkBuildEnv(o.Dir, env); err != nil {
+		return nil, err
+	}
 	var flags []string
 	if len(o.Tags) > 0 {
 		flags = []string{"-tags=" + strings.Join(o.Tags, ",")}

@@ -31,13 +31,16 @@ func buildHost(t *testing.T, out, pkg string, flags ...string) {
 
 // builtByRelease fails unless the binary was built by the toolchain R_go was
 // generated for: what is judged must be what the release toolchain builds.
-func builtByRelease(t *testing.T, bin string) {
+func builtByRelease(t *testing.T, bin string, tags ...string) {
 	t.Helper()
 	bi, err := buildinfo.ReadFile(bin)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := CheckToolchain(bi.GoVersion, runtime.GOARCH); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckBuildInfo(bi, Options{GOARCH: runtime.GOARCH, Tags: tags}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -69,7 +72,7 @@ func monitorSymbols(t *testing.T, tags ...string) *Result {
 		flags = []string{"-tags=" + strings.Join(tags, ",")}
 	}
 	buildHost(t, bin, "./cmd/svd-monitor", flags...)
-	builtByRelease(t, bin)
+	builtByRelease(t, bin, tags...)
 	r, err := SymbolAbsence(bin)
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +102,7 @@ func surfaceTools(t *testing.T, dir string, tags ...string) RunOptions {
 		flags = []string{"-tags=" + strings.Join(tags, ",")}
 	}
 	buildHost(t, o.Monitor, "./cmd/svd-monitor", flags...)
-	builtByRelease(t, o.Monitor)
+	builtByRelease(t, o.Monitor, tags...)
 	// Under the recorder every system call stops, so the stub's start-up runs
 	// long enough for Go's sysmon to preempt it with a tgkill of its own tgid,
 	// which the filter (built for M_p's tgid) answers with SIGSYS. The stub
