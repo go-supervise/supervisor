@@ -134,6 +134,43 @@ func dirfdParams(f *ssa.Function) []int {
 	return out
 }
 
+// rawDirfd are the argument positions (after the system-call number) that are
+// directory descriptors of a system call reached through a raw Syscall: the
+// wrappers' parameter names do not exist there, so the call number names them.
+var rawDirfd = map[string][]int{
+	"openat": {0}, "openat2": {0}, "mkdirat": {0}, "mknodat": {0}, "unlinkat": {0},
+	"fchownat": {0}, "fchmodat": {0}, "fchmodat2": {0}, "newfstatat": {0}, "statx": {0},
+	"readlinkat": {0}, "symlinkat": {1}, "linkat": {0, 2}, "renameat": {0, 2},
+	"renameat2": {0, 2}, "faccessat": {0}, "faccessat2": {0}, "utimensat": {0},
+	"futimesat": {0}, "execveat": {0}, "name_to_handle_at": {0}, "open_tree": {0},
+	"move_mount": {0, 2}, "mount_setattr": {0}, "fstatat": {0},
+}
+
+// isFdcwd says whether v is the constant AT_FDCWD (-100), as a signed value or
+// as the unsigned word (or its low 32 bits) a raw system call receives.
+func isFdcwd(v ssa.Value) bool {
+	for {
+		switch x := v.(type) {
+		case *ssa.Convert:
+			v = x.X
+			continue
+		case *ssa.ChangeType:
+			v = x.X
+			continue
+		case *ssa.Const:
+			if x.Value == nil || x.Value.Kind() != constant.Int {
+				return false
+			}
+			if i, ok := constant.Int64Val(x.Value); ok && i == -100 {
+				return true
+			}
+			u, ok := constant.Uint64Val(x.Value)
+			return ok && (u == ^uint64(99) || u == atFdcwd32)
+		}
+		return false
+	}
+}
+
 // unresolvable calls make a reached call the analysis cannot resolve.
 var unresolvable = map[string]bool{
 	"(reflect.Value).Call": true, "(reflect.Value).CallSlice": true,
@@ -448,6 +485,14 @@ func (a *analysis) checkSites() {
 				if !known {
 					name = fmt.Sprintf("syscall#%d", nr)
 				}
+				if !forkChild(f) && !a.onlyFromForkChild(f) {
+					for _, i := range rawDirfd[name] {
+						if i+1 < len(args) && isFdcwd(args[i+1]) {
+							a.fail("%s with AT_FDCWD at %s", name, a.callSite(e))
+							a.res.Chains[name+"(AT_FDCWD)"] = a.chain(f)
+						}
+					}
+				}
 				if gated[name] && forkChild(f) {
 					continue // behind a SysProcAttr field, which checkAttr refuses
 				}
@@ -667,44 +712,54 @@ func (k attrTypes) isAttrField(fa *ssa.FieldAddr, name string) bool {
 	return s.Field(fa.Field).Name() == name
 }
 
-// cloneflagsWithin says whether every value v can take is a constant inside
-// mask: a constant, a conversion of one, an Or of two, an And with one, a phi
-// of such. Anything else (a parameter, a load, a call result) is not.
-func cloneflagsWithin(v ssa.Value, mask uint64) bool {
-	return cloneflagsWithinSeen(v, mask, map[ssa.Value]bool{})
+// checkCloneflags judges one address of a SysProcAttr's Cloneflags field by
+// construction: the address has exactly one use, a store, and the stored value
+// is a constant inside the mask or a phi whose every edge is one. No arithmetic,
+// parameter, load or call result is accepted, and the address cannot escape to a
+// callee or be read back, so nothing can change the flags after this check.
+func (a *analysis) checkCloneflags(fa *ssa.FieldAddr) {
+	var uses []ssa.Instruction
+	for _, r := range *fa.Referrers() {
+		if !isDebugRef(r) {
+			uses = append(uses, r)
+		}
+	}
+	if len(uses) > 1 {
+		a.fail("SysProcAttr Cloneflags is used other than by a single store at %s", a.pos(uses[1].Pos()))
+		return
+	}
+	for _, u := range uses {
+		s, ok := u.(*ssa.Store)
+		if !ok || s.Addr != fa {
+			a.fail("SysProcAttr Cloneflags is used other than by a store at %s", a.pos(u.Pos()))
+			return
+		}
+		if !cloneflagsConst(s.Val, AllowedCloneflags) {
+			a.fail("SysProcAttr Cloneflags set at %s to a value that is not a constant within the mask %#x", a.pos(s.Pos()), uint64(AllowedCloneflags))
+		}
+	}
 }
 
-func cloneflagsWithinSeen(v ssa.Value, mask uint64, seen map[ssa.Value]bool) bool {
-	if seen[v] {
-		return true // a loop of phis adds no value of its own
-	}
-	seen[v] = true
-	switch x := v.(type) {
-	case *ssa.Const:
-		// a value that is no integer (or none at all) converts to the unknown
-		// constant, which has no Uint64 value
-		u, ok := constant.Uint64Val(constant.ToInt(x.Value))
-		return ok && u&^mask == 0
-	case *ssa.Convert:
-		return cloneflagsWithinSeen(x.X, mask, seen)
-	case *ssa.ChangeType:
-		return cloneflagsWithinSeen(x.X, mask, seen)
-	case *ssa.Phi:
-		for _, e := range x.Edges {
-			if !cloneflagsWithinSeen(e, mask, seen) {
+// cloneflagsConst says whether v is a constant inside mask, or a phi whose
+// every edge is one.
+func cloneflagsConst(v ssa.Value, mask uint64) bool {
+	if p, ok := v.(*ssa.Phi); ok {
+		for _, e := range p.Edges {
+			if c, isConst := e.(*ssa.Const); !isConst || !constWithin(c, mask) {
 				return false
 			}
 		}
 		return true
-	case *ssa.BinOp:
-		switch x.Op {
-		case token.OR:
-			return cloneflagsWithinSeen(x.X, mask, seen) && cloneflagsWithinSeen(x.Y, mask, seen)
-		case token.AND:
-			return cloneflagsWithinSeen(x.X, mask, seen) || cloneflagsWithinSeen(x.Y, mask, seen)
-		}
 	}
-	return false
+	c, ok := v.(*ssa.Const)
+	return ok && constWithin(c, mask)
+}
+
+func constWithin(c *ssa.Const, mask uint64) bool {
+	// a value that is no integer (or none at all) converts to the unknown
+	// constant, which has no Uint64 value
+	u, ok := constant.Uint64Val(constant.ToInt(c.Value))
+	return ok && u&^mask == 0
 }
 
 // origin says whether v is a value the allowed constructor may hold: an
@@ -805,6 +860,9 @@ func (a *analysis) checkAttr() {
 				switch in := in.(type) {
 				case *ssa.FieldAddr:
 					field(in, in.X, in.Field)
+					if k.isAttrField(in, "Cloneflags") {
+						a.checkCloneflags(in)
+					}
 				case *ssa.Field:
 					field(in, in.X, in.Field)
 				case *ssa.MakeInterface:
@@ -830,19 +888,6 @@ func (a *analysis) checkAttr() {
 							}
 						default:
 							a.fail("SysProcAttr is not a composite literal at %s", a.pos(r.Pos()))
-						}
-					}
-				case *ssa.Store:
-					if fa, isField := in.Addr.(*ssa.FieldAddr); isField && k.isAttrField(fa, "Cloneflags") {
-						if !cloneflagsWithin(in.Val, AllowedCloneflags) {
-							a.fail("SysProcAttr Cloneflags set at %s to a value that is not a constant within the mask %#x", a.pos(in.Pos()), uint64(AllowedCloneflags))
-						}
-						// and the field is only ever written: a loaded or escaping
-						// address could change the flags after the check
-						for _, r := range *fa.Referrers() {
-							if s, isStore := r.(*ssa.Store); (!isStore || s.Addr != fa) && !isDebugRef(r) {
-								a.fail("SysProcAttr Cloneflags is used other than by a store at %s", a.pos(r.Pos()))
-							}
 						}
 					}
 				}

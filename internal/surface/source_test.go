@@ -22,7 +22,7 @@ func source(t *testing.T, arch, name string, tags ...string) *Result {
 	// the fixtures that exercise the checks made INSIDE the one function allowed
 	// to build a SysProcAttr are that function; every other fixture is not
 	switch name {
-	case "attr", "attrglobal", "attrloaded", "forkok", "twinattr", "paramattr", "wrapperattr", "cloneparam", "cloneuser", "cloneok", "clonephi", "cloneloop", "clonelookalike":
+	case "attr", "attrglobal", "attrloaded", "forkok", "twinattr", "paramattr", "wrapperattr", "cloneparam", "cloneuser", "cloneok", "clonephi", "cloneloop", "clonelookalike", "cloneand", "cloneset", "clonetwo":
 		o.AttrConstructors = []string{"github.com/go-supervise/supervisor/" + fixDir + name + "."}
 	}
 	r, err := SourceHalf(o)
@@ -124,6 +124,14 @@ func TestSourceHalfRefusesWhatItCouldNotSee(t *testing.T) {
 		{"cloneuser", []string{`Cloneflags set at ` + fixDir + `cloneuser/main.go:`, `that is not a constant within the mask`}},
 		// one branch of a conditional is enough
 		{"clonephi", []string{`Cloneflags set at ` + fixDir + `clonephi/main.go:`, `that is not a constant within the mask`}},
+		// only a constant, or a choice between constants, may be stored
+		{"cloneloop", []string{`Cloneflags set at ` + fixDir + `cloneloop/main.go:`, `that is not a constant within the mask`}},
+		{"cloneand", []string{`Cloneflags set at ` + fixDir + `cloneand/main.go:`, `that is not a constant within the mask`}},
+		// the field's address must be used by one store and nothing else
+		{"cloneset", []string{`Cloneflags is used other than by a store at ` + fixDir + `cloneset/main.go:`}},
+		{"clonetwo", []string{`Cloneflags is used other than by a single store at ` + fixDir + `clonetwo/main.go:`}},
+		// a raw system call receives AT_FDCWD as the wrappers do
+		{"rawfdcwd", []string{`mkdirat with AT_FDCWD at ` + fixDir + `rawfdcwd/main.go:`}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -211,9 +219,8 @@ func TestSourceHalfForkChildIsGatedByTheAttr(t *testing.T) {
 // Cloneflags built as spawn.Start builds it (constants inside the mask, one of
 // them under a condition) is not a finding.
 func TestSourceHalfAcceptsCloneflagsInsideTheMask(t *testing.T) {
-	// a loop makes a cycle of phis; another type's Cloneflags field is not the
-	// attribute's
-	for _, name := range []string{"cloneok", "cloneloop", "clonelookalike"} {
+	// another type's Cloneflags field is not the attribute's
+	for _, name := range []string{"cloneok", "clonelookalike"} {
 		t.Run(name, func(t *testing.T) {
 			r := source(t, "amd64", name)
 			if len(r.Failures) != 0 {

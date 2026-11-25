@@ -148,7 +148,7 @@ func Start(c *Config) (ch *Child, err error) {
 	}
 	flags := uintptr(unix.CLONE_NEWNS)
 	if c.Lane {
-		flags |= unix.CLONE_NEWIPC | unix.CLONE_NEWNET
+		flags = unix.CLONE_NEWNS | unix.CLONE_NEWIPC | unix.CLONE_NEWNET
 	}
 	files := make([]uintptr, fdlayout.NFiles)
 	files[fdlayout.DevNull] = uintptr(c.DevNullFD)

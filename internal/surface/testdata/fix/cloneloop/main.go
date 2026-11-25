@@ -1,5 +1,5 @@
 // Fixture of the source half: Cloneflags accumulated in a loop, a cycle of
-// phis, from constants inside the mask.
+// phis that is not a choice between constants: refused.
 package main
 
 import "syscall"
