@@ -1,0 +1,3 @@
+# The committed tables of the syscall-surface gate are compared byte for byte
+# with what the tool generates: a CRLF checkout (Windows) must not change them.
+internal/surface/*.txt text eol=lf
