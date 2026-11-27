@@ -47,8 +47,8 @@ only where the review opened the source (openbsd/src `958c7cbfd80cf0fbc1871d0928
 6. Every filesystem on which a service uid can write is mounted `nosuid` (see F5 below). This is an
    operator duty today; whether svd can check it at plan time is open.
 7. **OpenBSD amd64 and arm64 only.** The mount and process-table layouts are 64-bit only; sdcreds
-   v0.4.2 (announced, not yet re-read by this author) refuses to build on 32-bit OpenBSD, so svd
-   refuses a 32-bit OpenBSD target at plan time.
+   v0.4.1 already fails to build on openbsd/386 and openbsd/arm (`helper_openbsd.go:183`, uint64
+   against uint32), and v0.4.2 is announced to refuse them explicitly, so svd refuses a 32-bit OpenBSD target at plan time.
 8. The killer locks `/var/run/sdcreds-killer-<uid>.lock`, **one per target user**
    (`killerLockBase`/`killerLockFile`, `delivery/uidkill.go:161-173`; README.md:252-254), and the
    per-uid lock `/var/run/sdcreds/.uid-<N>.lock` (README.md:267-269) live under `/var/run`, which
@@ -145,9 +145,13 @@ Residuals, stated as they are:
    **release of a tree**, not for the main program: `sdcreds run` (root) sends SIGKILL to the stub
    with `c.Process.Kill()` (`run_openbsd.go:238`) and **forwards the stop signals** TERM, INT, HUP,
    QUIT, USR1 and USR2 to it with `c.Process.Signal(s)` (`run_openbsd.go:263`, set at `:199`), as
-   does root's SIGKILL to its own killer child on timeout (not re-read for a line at v0.4.1). All three target a **direct, unreaped
-   child** of root's process, whose pid cannot have been reused (Go's `os.Process` holds it until
-   `Wait`). **A graceful stop reaches the program** by svd signalling `sdcreds run` (the main
+   does root's SIGKILL to its own killer child on timeout (not re-read for a line at v0.4.1). All three target a **direct child**
+   of root's process. **Residual (open at v0.4.1): the pid can be reused.** On OpenBSD Go 1.27.4
+   marks a process done only after reaping it (`os/wait_unimp.go:8,19`, `exec_unix.go:44-52`), so
+   a stop signal forwarded at `run_openbsd.go:263` after the Wait goroutine has reaped (`:234`)
+   can reach a reused pid, as root. sdcreds plans to close it in v0.4.2 (waitid WNOWAIT, mark done
+   under a lock, then reap); this document does not call it fixed until that tag is out.
+   **A graceful stop reaches the program** by svd signalling `sdcreds run` (the main
    pid, root's own child), which forwards the signal to the program; svd never signals a pid it
    read from a list. SUPERVISOR.md l.787 covers graceful signals too, so it is amended: « on
    OpenBSD, a graceful signal is sent by svd to its own child `sdcreds run`, which forwards it to
@@ -180,8 +184,10 @@ Residuals, stated as they are:
   against a teardown that could last longer; that defect is fixed.) A run still alive after 47 s
   is refused with 125.
 - svd side: the restart path needs no extra wait of its own for the same service. The **start
-  timeout of an OpenBSD service must exceed 47 s plus the service's own start time**, or svd will
-  charge the wait as a start timeout. Two services sharing a uid are refused at plan time (§1.2).
+  timeout of an OpenBSD service must exceed 47 s plus up to 20 s waiting on another user's killer
+  (`mfs_openbsd.go:81`, `rootKillBudget`), so about 67 s plus the service's own start time**, or
+  svd will charge the wait as a start timeout. Consequence: one killer running its full 20 s
+  delays the start of every other service. Two services sharing a uid are refused at plan time (§1.2).
 
 ## 6. Exit statuses (answers F7)
 
