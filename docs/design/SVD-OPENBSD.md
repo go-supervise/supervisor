@@ -46,7 +46,10 @@ only where the review opened the source (openbsd/src `958c7cbfd80cf0fbc1871d0928
    `trustedSelf`).
 6. Every filesystem on which a service uid can write is mounted `nosuid` (see F5 below). This is an
    operator duty today; whether svd can check it at plan time is open.
-7. The killer locks `/var/run/sdcreds-killer-<uid>.lock`, **one per target user**
+7. **OpenBSD amd64 and arm64 only.** The mount and process-table layouts are 64-bit only; sdcreds
+   v0.4.2 (announced, not yet re-read by this author) refuses to build on 32-bit OpenBSD, so svd
+   refuses a 32-bit OpenBSD target at plan time.
+8. The killer locks `/var/run/sdcreds-killer-<uid>.lock`, **one per target user**
    (`killerLockBase`/`killerLockFile`, `delivery/uidkill.go:161-173`; README.md:252-254), and the
    per-uid lock `/var/run/sdcreds/.uid-<N>.lock` (README.md:267-269) live under `/var/run`, which
    `etc/rc` empties at boot.
