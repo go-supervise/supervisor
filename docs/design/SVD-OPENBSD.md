@@ -64,10 +64,17 @@ Consequences svd must honour:
   `--pass-fd N` (repeatable, N >= 4, open and not close-on-exec)
   (`cmd/sdcreds/gate_unix.go:67,105-109,133,209,245,258`; flags at `cmd/sdcreds/run.go:311-312`).
   Both are refused for what sdcreds owns: `PATH`, `CREDENTIALS_DIRECTORY`, `__SDCREDS_*`,
-  descriptors 0-3 (`gate_unix.go:234-239`). They exist on OpenBSD only (`run.go:32`). A notify-type
-  service is started with `--pass-env NOTIFY_SOCKET --pass-env LISTEN_FDS --pass-env LISTEN_PID
-  --pass-fd 4` and so on (README.md:227-230). `LISTEN_PID` is passed unchanged: it names the pid
-  the caller expected, not the program's, so a service that checks it must not be given it.
+  descriptors 0-3 (`gate_unix.go:234-239`). They exist on OpenBSD only (`run.go:32`).
+  **What works, and what does not.** Readiness by a **passed descriptor** (`--pass-fd N`) works.
+  **Readiness by `NOTIFY_SOCKET` does not**: the sender check of SUPERVISOR.md l.1220-1221 requires
+  the sender pid (`SCM_CREDENTIALS`) to equal the epoch's main pid, and on OpenBSD the main pid is
+  root's `sdcreds run`, while the program that writes to the socket is its descendant
+  (`run_openbsd.go:214-224`), so the check refuses it. `sd_listen_fds` is also broken: `LISTEN_PID`
+  is passed unchanged (README.md:229-230) and names the pid the caller expected, not the
+  program's, so a service that checks it refuses it; withholding it breaks `sd_listen_fds` the
+  other way. F2 is therefore **answered for descriptors and plain environment only**; notify-type
+  (`NOTIFY_SOCKET`) and socket-activated (`LISTEN_FDS`) services are **open** on OpenBSD and svd
+  refuses them at plan time. README.md:227-228's example is not usable with svd's sender check.
   Still true: the plan's **umask is not applied**, the program runs with umask 077
   (README.md:283-284).
 - **Mode U is gone (F3).** A service under the owner's login uid is refused at plan time: the
@@ -88,7 +95,8 @@ sdcreds v0.4.0 removes the root pid-list fallback. The release is a **split-cred
 - root starts a short-lived killer process, which drops to
   `setresuid(killer, target, killer)` in **one** call (`delivery/killuid_openbsd.go:31-45`), after
   which it sends only `kill(-1, SIGKILL)`, repeatedly, until the kernel reports nothing left
-  (`killuid_openbsd.go:57-61`, `delivery/uidkill.go:18`). The kernel walks its own table; no pid
+  (loop at `killuid_openbsd.go:35-53` for the credentials and `72-82` for the signal loop,
+  `delivery/uidkill.go:18`). The kernel walks its own table; no pid
   crosses user space.
 - Why the target cannot stop it (from `cansignal()`, as read by the review): the killer's real and
   saved uid is the reserved uid and the target's processes match neither, so a signal from the
@@ -99,7 +107,8 @@ sdcreds v0.4.0 removes the root pid-list fallback. The release is a **split-cred
   killer equal to the target (`uidkill.go:67-90`).
 
 **Amendment to l.787, OpenBSD**: « the signaller is a process whose **effective** uid is the target
-service's and whose **real and saved** uid is a dedicated uid that owns no process; never root, and
+service's and whose **real and saved** uid is a dedicated uid that owns no process; for the release
+of a tree, never root (residual 5 lists the direct-child signals root does send), and
 never a process whose real uid is the target's ». This keeps the intent of the rule (the target's
 uid is the authority, a pid list is never signalled) and fixes the one thing the Linux wording
 cannot say on OpenBSD.
@@ -115,8 +124,18 @@ Residuals, stated as they are:
    check sees it, and the next start is refused: fail-closed, but a denial of service.
 4. Whether a process of the target can `ptrace` the killer was not examined (`sys_process.c` not
    opened).
-5. SIGKILL to root's own unreaped killer child on timeout is the one signal by pid; it is a direct
-   child, so its pid cannot have been reused.
+5. **Root does signal by pid, in two other places**, so « never root » (above) holds for the
+   **release of a tree**, not for the main program: `sdcreds run` (root) sends SIGKILL to the stub
+   with `c.Process.Kill()` (`run_openbsd.go:238`) and **forwards the stop signals** TERM, INT, HUP,
+   QUIT, USR1 and USR2 to it with `c.Process.Signal(s)` (`run_openbsd.go:263`, set at `:199`), as
+   does root's SIGKILL to its own killer child on timeout. All three target a **direct, unreaped
+   child** of root's process, whose pid cannot have been reused (Go's `os.Process` holds it until
+   `Wait`). **A graceful stop reaches the program** by svd signalling `sdcreds run` (the main
+   pid, root's own child), which forwards the signal to the program; svd never signals a pid it
+   read from a list. SUPERVISOR.md l.787 covers graceful signals too, so it is amended: « on
+   OpenBSD, a graceful signal is sent by svd to its own child `sdcreds run`, which forwards it to
+   its own child; a tree is released only by the split-credential killer ». A `stop.signal`
+   outside the forwarded set is refused at plan time (§7).
 
 ## 4. Process scan and set-id survivors (answers F5, partly)
 
@@ -179,7 +198,7 @@ Revision 1 §1 and §3 claimed more than the decided path does. Corrected:
   `/var/run/sdcreds/<service>` discloses service names to local users; the contents are 0400/0500
   owned by the service uid. Accepted residual.
 - Memory: `mlockall` is unusable from a Go process on OpenBSD (README.md:287-293); protection is
-  encrypted swap, `RLIMIT_CORE` 0 and `kern.nosuidcoredump`. A crash dump taken by an
+  encrypted swap, `RLIMIT_CORE` 0 and `kern.nosuidcoredump`. A memory dump taken by an
   administrator can still contain the plaintext.
 - No cgroups, no freeze, no tree accounting. The uid kill is the tree kill for **a service run by
   `sdcreds run`**. Whether a service **without credentials** also runs under `sdcreds run` (to get
@@ -195,6 +214,7 @@ These are the edits to apply to SUPERVISOR.md when this amendment lands (not app
 | l.265 | POSIX path alphabet | OpenBSD |
 | l.776, l.787 | signalling rule | the OpenBSD wording of §3 |
 | l.821-825 | §3.3 platform-scope table | OpenBSD row: no delegation, no grants, no readers |
+| l.1220-1221 | notify sender check (main pid) | OpenBSD: `NOTIFY_SOCKET` and `LISTEN_FDS` unsupported, only `--pass-fd` readiness (§2) |
 | l.1275-1280 | §5.1 tree-tracking table | OpenBSD row: uid kill via `sdcreds run`, no freeze |
 | §5.3 | modes | rc.d glue |
 | l.1346-1361 | §6 credentials | the text of §2 |
@@ -213,9 +233,11 @@ These are the edits to apply to SUPERVISOR.md when this amendment lands (not app
    (`delivery/kinfo.go:50`) comes from the declaration order in `sys/sys/sysctl.h` (the source
    comment says lines 483-486 of master), not from a measurement of a running kernel. The offsets
    past 144 are « summed by hand » (`kinfo.go:31-33`). The code reads the table at a fixed stride
-   and checks each element against the uid asked (`kinfo.go:35-38`); whether those checks would
-   catch a wrong 568 specifically was not established. A wrong offset would misjudge saved uids,
-   so a process might be missed or wrongly counted. It needs a check on a real OpenBSD host.
+   and checks each element against the uid asked (`kinfo.go:35-38`). **Nothing checks the
+   saved-uid offset today**: `checkProcLayout` checks only the real uid, and `parseKinfoAll` does
+   not validate the saved uid it reads. A wrong 568 would therefore misjudge saved uids silently,
+   so a process might be missed or wrongly counted. v0.4.1 may add a check. It needs a
+   measurement on a real OpenBSD host.
 3. A set-id survivor is not killed (§4).
 4. `PS_NOBROADCASTKILL` and ptrace of the killer are unverified (§3).
 5. Nothing in this document was executed on OpenBSD by its author.
@@ -232,7 +254,7 @@ third-party image run as root is not acceptable for it.
 | # | Finding | Status | Where |
 |---|---|---|---|
 | F1 | wrong credential route | **answered** | §2; `run.go:193` |
-| F2 | env, fds, readiness stripped | **answered**; umask still not passed | §2; `gate_unix.go:67-258`, `run.go:311-312` |
+| F2 | env, fds, readiness stripped | **answered** for env and `--pass-fd` readiness; `NOTIFY_SOCKET`/`LISTEN_FDS` **open**; umask not passed | §2; `gate_unix.go:67-258`, `run.go:311-312` |
 | F3 | mode U, root and a dedicated uid | **answered** by requirement | §1.1-1.2, §2; `run.go:193`, `killuid_openbsd.go:22-24` |
 | F4 | signalling rule vs root pid list | **answered**, residuals listed | §3; `uidkill.go`, `killuid_openbsd.go:31-61` |
 | F5 | set-id survivor | scan **answered**; kill of a set-id survivor **open** | §4; `kinfo.go:73-77`, README.md:257-260 |
