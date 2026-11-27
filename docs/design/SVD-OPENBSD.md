@@ -4,9 +4,12 @@ Status: PROPOSAL, for review. It edits no other file. The line numbers of SUPERV
 `origin/main` `2346a907841ac403ee785734ce309bf88f2167fa`.
 
 This revision answers the review of revision 1 (verdict FIX, findings F1 to F10, plus the F4 design
-section). It is written against **sdcreds v0.4.1**, tag `v0.4.1` = commit
-`992222e967f27523df0233685c1744fd40f3d8fb` (go-authn/sdcreds). Every
-`file:line` below was re-read at that tag, from a detached checkout of it (v0.4.0, commit
+section). It is written against **sdcreds v0.4.3**, tag `v0.4.3` = commit
+`3d47f8c732639ae01d49f651585a4cc68b38eb70` (go-authn/sdcreds). Every
+`file:line` below was re-read at that tag, from a detached checkout of it; v0.4.1 to v0.4.3 changed
+only `cmd/sdcreds/run_openbsd.go` among the cited files (the stub signal guard) and added the
+32-bit build refusal, so lines cited in other files are those of v0.4.1 and were checked unchanged
+(v0.4.0, commit
 `64d90ac`, was the first draft's base; v0.4.1 changed the teardown bound, the kill lock, the exit
 status of a failed release, the killer checks at start and the saved-uid layout check). OpenBSD kernel behaviour is cited
 only where the review opened the source (openbsd/src `958c7cbfd80cf0fbc1871d092889ab121c6d5851`,
@@ -16,7 +19,7 @@ only where the review opened the source (openbsd/src `958c7cbfd80cf0fbc1871d0928
 
 - OpenBSD is **P5** and **owner-only**: no grants, no readers (SUPERVISOR.md l.1800 says
   « grants and readers »; both are refused).
-- Credentials, and the service's identity, go through `sdcreds run` v0.4.1.
+- Credentials, and the service's identity, go through `sdcreds run` v0.4.3.
 - uid 0, gid 0 and any supplementary group 0 are refused everywhere (`wheel` is refused by name
   too). svd's plan validation refuses first, with its own error; sdcreds refuses again
   (README.md:241-243, `delivery/delivery.go:168`).
@@ -47,8 +50,10 @@ only where the review opened the source (openbsd/src `958c7cbfd80cf0fbc1871d0928
 6. Every filesystem on which a service uid can write is mounted `nosuid` (see F5 below). This is an
    operator duty today; whether svd can check it at plan time is open.
 7. **OpenBSD amd64 and arm64 only.** The mount and process-table layouts are 64-bit only; sdcreds
-   v0.4.1 already fails to build on openbsd/386 and openbsd/arm (`helper_openbsd.go:183`, uint64
-   against uint32), and v0.4.2 is announced to refuse them explicitly, so svd refuses a 32-bit OpenBSD target at plan time.
+   v0.4.1 already failed to build on openbsd/386 and openbsd/arm (`helper_openbsd.go:183`, uint64
+   against uint32), and v0.4.2 (released) refuses them on purpose at build time
+   (`delivery/refuse_openbsd_32bit.go`, build tag `openbsd && (386 || arm)`), so svd refuses a
+   32-bit OpenBSD target at plan time.
 8. The killer locks `/var/run/sdcreds-killer-<uid>.lock`, **one per target user**
    (`killerLockBase`/`killerLockFile`, `delivery/uidkill.go:161-173`; README.md:252-254), and the
    per-uid lock `/var/run/sdcreds/.uid-<N>.lock` (README.md:267-269) live under `/var/run`, which
@@ -143,14 +148,21 @@ Residuals, stated as they are:
    opened).
 5. **Root does signal by pid, in two other places**, so « never root » (above) holds for the
    **release of a tree**, not for the main program: `sdcreds run` (root) sends SIGKILL to the stub
-   with `c.Process.Kill()` (`run_openbsd.go:238`) and **forwards the stop signals** TERM, INT, HUP,
-   QUIT, USR1 and USR2 to it with `c.Process.Signal(s)` (`run_openbsd.go:263`, set at `:199`), as
-   does root's SIGKILL to its own killer child on timeout (not re-read for a line at v0.4.1). All three target a **direct child**
-   of root's process. **Residual (open at v0.4.1): the pid can be reused.** On OpenBSD Go 1.27.4
-   marks a process done only after reaping it (`os/wait_unimp.go:8,19`, `exec_unix.go:44-52`), so
-   a stop signal forwarded at `run_openbsd.go:263` after the Wait goroutine has reaped (`:234`)
-   can reach a reused pid, as root. sdcreds plans to close it in v0.4.2 (waitid WNOWAIT, mark done
-   under a lock, then reap); this document does not call it fixed until that tag is out.
+   through `stubGuard` (`run_openbsd.go:249`, `stubguard.go:29-37`) and **forwards the stop signals**
+   TERM, INT, HUP, QUIT, USR1 and USR2 to it through the same guard (`run_openbsd.go:274`, set at
+   `:199`). Root's SIGKILL to its own killer child on timeout is the context kill of `os/exec`
+   (`killuid_openbsd.go:88-94`), which the guard does not wrap; whether the window below exists
+   there was not examined. These target a **direct child** of root's process.
+   **Fixed in v0.4.3 (it was open in v0.4.1 and v0.4.2): the stub pid could be reused.** On
+   OpenBSD Go 1.27.4 marks a process done only after reaping it (`os/wait_unimp.go:8,19`,
+   `exec_unix.go:44-52`), so a stop signal forwarded after the Wait goroutine had reaped could reach
+   a reused pid, as root. OpenBSD has no `waitid`/`WNOWAIT`, so v0.4.3 observes the exit with a
+   kqueue `NOTE_EXIT` before the reap (`stubwatch_openbsd.go`, called at `run_openbsd.go:237`; a
+   zombie keeps its pid), marks the guard gone under the lock the forwarder takes, and only then
+   reaps (`reapAfterExit`, `stubguard.go:41-45`, started at `run_openbsd.go:245`). The test is
+   `TestWatchExitFiresBeforeTheReap` (`stubwatch_openbsd_test.go:12`), which runs on the OpenBSD VM
+   lanes; this author did not run it. On Linux the window is absent **from reading the Go source**
+   (pidfd, or the process is marked done before the reap), not from a test.
    **A graceful stop reaches the program** by svd signalling `sdcreds run` (the main
    pid, root's own child), which forwards the signal to the program; svd never signals a pid it
    read from a list. SUPERVISOR.md l.787 covers graceful signals too, so it is amended: « on
