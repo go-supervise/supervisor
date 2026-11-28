@@ -9,7 +9,10 @@ section). It is written against **sdcreds v0.4.4**, tag `v0.4.4` = commit
 `file:line` below was re-read at that tag, from a detached checkout of it; v0.4.1 to v0.4.4 changed
 only `cmd/sdcreds/run_openbsd.go` and `delivery/killuid_openbsd.go` among the cited files (the
 signal guard; one import line, so lines before `runKiller` moved by one), added the 32-bit build
-refusal, and moved the guard to `internal/exitguard`; lines cited in other files are unchanged
+refusal, and moved the guard to `internal/exitguard`. v0.4.4 also inserted 4 lines at
+`README.md:202` (the 32-bit refusal), so every README line cited at or after 202 was re-read in
+the v0.4.4 README and moved by 4. The other cited files were checked unchanged, except
+`s6/start_linux.go`, cited at its v0.4.4 lines
 (v0.4.0, commit
 `64d90ac`, was the first draft's base; v0.4.1 changed the teardown bound, the kill lock, the exit
 status of a failed release, the killer checks at start and the saved-uid layout check). OpenBSD kernel behaviour is cited
@@ -23,7 +26,7 @@ only where the review opened the source (openbsd/src `958c7cbfd80cf0fbc1871d0928
 - Credentials, and the service's identity, go through `sdcreds run` v0.4.4.
 - uid 0, gid 0 and any supplementary group 0 are refused everywhere (`wheel` is refused by name
   too). svd's plan validation refuses first, with its own error; sdcreds refuses again
-  (README.md:241-243, `delivery/delivery.go:168`).
+  (README.md:245-247, `delivery/delivery.go:168`).
 - Questions S3 and S4 of revision 1 are closed by the three lines above and are removed.
 
 ## 1. Install requirements (new, stated plainly)
@@ -32,19 +35,19 @@ only where the review opened the source (openbsd/src `958c7cbfd80cf0fbc1871d0928
    (`cmd/sdcreds/run.go:193`, `delivery/delivery.go:75,168`).
 2. **One dedicated uid per service**, which owns no other process. sdcreds refuses a user that
    already has processes (`delivery/killuid_openbsd.go:25`, `delivery/mfs_openbsd.go:84-87`), and a
-   second service for the same user is refused at once (README.md:219, 267-270). svd refuses two
+   second service for the same user is refused at once (README.md:223, 271-274). svd refuses two
    services with the same `run_as` at **plan time**, and refuses a service whose uid is the
    owner's login uid.
 3. **A reserved killer uid, `_sdkill`, created once at install**:
    `useradd -s /sbin/nologin -d /var/empty -c "sdcreds killer" _sdkill`
-   (README.md:257-258, `delivery/uidkill.go:67-74`). It must own no process and must be neither
+   (README.md:261-262, `delivery/uidkill.go:67-74`). It must own no process and must be neither
    root nor a service uid (`checkKiller`, `delivery/uidkill.go:104-118`). **A delivery is refused
    to start** (`ErrKiller`, `uidkill.go:65`) **when the user does not exist** (`lookupKiller`,
    `delivery/killuid_openbsd.go:207-218`) **or when it owns a process**: `checkKillerAtStart`
    (`uidkill.go:190-203`, called at `delivery/mfs_openbsd.go:77-83`) waits up to 20 s for the
-   killer of a release that is running, then refuses (README.md:259-260). The name is a package
+   killer of a release that is running, then refuses (README.md:263-264). The name is a package
    variable (`KillerUser`, `uidkill.go:74`).
-4. `vm.swapencrypt.enable` must be 1 (`cmd/sdcreds/run_openbsd.go:48-65`; README.md:276-280). There
+4. `vm.swapencrypt.enable` must be 1 (`cmd/sdcreds/run_openbsd.go:48-65`; README.md:280-284). There
    is no override. This is a hard precondition of every P5 service that has credentials.
 5. The `sdcreds` binary is root-owned along a trusted path (`run_openbsd.go:113,289`,
    `trustedSelf`).
@@ -56,8 +59,8 @@ only where the review opened the source (openbsd/src `958c7cbfd80cf0fbc1871d0928
    (`delivery/refuse_openbsd_32bit.go`, build tag `openbsd && (386 || arm)`), so svd refuses a
    32-bit OpenBSD target at plan time.
 8. The killer locks `/var/run/sdcreds-killer-<uid>.lock`, **one per target user**
-   (`killerLockBase`/`killerLockFile`, `delivery/uidkill.go:161-173`; README.md:252-254), and the
-   per-uid lock `/var/run/sdcreds/.uid-<N>.lock` (README.md:267-269) live under `/var/run`, which
+   (`killerLockBase`/`killerLockFile`, `delivery/uidkill.go:161-173`; README.md:256-258), and the
+   per-uid lock `/var/run/sdcreds/.uid-<N>.lock` (README.md:271-273) live under `/var/run`, which
    `etc/rc` empties at boot.
 
 ## 2. §6 credentials and the launch route (answers F1, F2, F3)
@@ -75,7 +78,7 @@ Replace the revision-1 text, which had svd's helper link `delivery.Prepare`, by:
 Consequences svd must honour:
 
 - **Environment and descriptors (F2).** The program gets an allow-list: `LANG`, `LC_*`, `TZ`,
-  `TERM`, a fixed `PATH`, `CREDENTIALS_DIRECTORY` and descriptors 0-2 (README.md:221-223).
+  `TERM`, a fixed `PATH`, `CREDENTIALS_DIRECTORY` and descriptors 0-2 (README.md:225-227).
   Since v0.4.0 there are `--pass-env NAME` (repeatable, passed as is, not passed when unset) and
   `--pass-fd N` (repeatable, N >= 4, open and not close-on-exec)
   (`cmd/sdcreds/gate_unix.go:107-110,136,211,246,263`; flags at `cmd/sdcreds/run.go:311-312`).
@@ -86,13 +89,13 @@ Consequences svd must honour:
   the sender pid (`SCM_CREDENTIALS`) to equal the epoch's main pid, and on OpenBSD the main pid is
   root's `sdcreds run`, while the program that writes to the socket is its descendant
   (`run_openbsd.go:215-225`), so the check refuses it. `sd_listen_fds` is also broken: `LISTEN_PID`
-  is passed unchanged (README.md:229-230) and names the pid the caller expected, not the
+  is passed unchanged (README.md:233-234) and names the pid the caller expected, not the
   program's, so a service that checks it refuses it; withholding it breaks `sd_listen_fds` the
   other way. F2 is therefore **answered for descriptors and plain environment only**; notify-type
   (`NOTIFY_SOCKET`) and socket-activated (`LISTEN_FDS`) services are **open** on OpenBSD and svd
-  refuses them at plan time. README.md:227-230's example is not usable with svd's sender check.
+  refuses them at plan time. README.md:231-234's example is not usable with svd's sender check.
   Still true: the plan's **umask is not applied**, the program runs with umask 077
-  (README.md:287-288).
+  (README.md:291-292).
 - **Mode U is gone (F3).** A service under the owner's login uid is refused at plan time: the
   owner's own processes make the uid busy, and a release would kill all of them. The
   owner-only mode of OpenBSD means « the owner may start and stop it », not « it runs as the
@@ -134,7 +137,7 @@ Residuals, stated as they are:
 
 1. **Killers of different users can kill each other.** All killers share the real uid. v0.4.1
    serialises only the kills of **one** user, with a lock per user (`uidkill.go:161-173`,
-   `killLocked` `:177-184`; README.md:252-256); a global lock was dropped because a release then
+   `killLocked` `:177-184`; README.md:256-260); a global lock was dropped because a release then
    waited for another user's kill and gave up without killing anything. Two kills of different
    users therefore run at once and each can signal the other's killer. A killer that dies of it is
    run again, because `killAllOf` decides by the process table and never by the killer's status
@@ -186,10 +189,10 @@ Residuals, stated as they are:
   `delivery/kinfo.go:68-70`) and returns every live process whose **real, effective or saved** uid
   is the target (`parseKinfoAll`, `kinfo.go:77-109`, the three offsets at `:93`; used at
   `killuid_openbsd.go:155`), because the kernel has no selector by saved uid. Zombies are not
-  counted (`kinfo.go:101-104`; README.md:266-267).
+  counted (`kinfo.go:101-104`; README.md:270-271).
 - **Left open, with the reason.** A process that holds the target uid only through a set-id file run
   by another user (real uid v, effective and saved u, `PS_SUGID` set) is counted by the start check
-  but is **not reached by the killer** (README.md:261-264). The release then reports a survivor and
+  but is **not reached by the killer** (README.md:265-267). The release then reports a survivor and
   the next start is refused until the process is gone. It is fail-closed, and it is a denial of
   service that lasts until an operator steps in. The mitigation is the `nosuid` requirement of §1.6.
   It is not closed by v0.4.1 and cannot be by the killer's credentials alone.
@@ -198,7 +201,7 @@ Residuals, stated as they are:
 
 - v0.4.1: a start **waits up to 47 s** for the previous run of the same service to finish its
   teardown, instead of being refused. The helper holds the lock until the user's processes are
-  killed and the mount is gone, which can take up to 46 s (README.md:216-219). The bound is
+  killed and the mount is gone, which can take up to 46 s (README.md:220-223). The bound is
   **derived from the constants, so it cannot fall behind them**: `TeardownWait = teardownMax +
   1 s` (`delivery/lock_unix.go:42-50`), `teardownMax = killTotal + unmountWait` (`uidkill.go:53`),
   `killTotal = killLockWait + rootKillBudget + 1 s` (`uidkill.go:47`), that is 20 + 20 + 1 + 5 s
@@ -214,7 +217,7 @@ Residuals, stated as they are:
 ## 6. Exit statuses (answers F7)
 
 sdcreds' own endings are reserved (`cmd/sdcreds/run.go:44-52`, `cmd/sdcreds/releaseexit.go:8-24`,
-README.md:202-214, 274-275):
+README.md:206-218, 278-279):
 
 | Status | Meaning | svd class |
 |---|---|---|
@@ -235,7 +238,7 @@ next start's own checks (`ErrUIDBusy`, refused with 125) pass, and it reports th
 cannot recover the program's own status except from that stderr line.
 
 **Known limit, stated honestly:** a program that itself exits 125, 126 or 70 cannot be told apart
-from sdcreds' own endings (README.md:213 says so for 125 and 126; 70 is the sysexits `EX_SOFTWARE`
+from sdcreds' own endings (README.md:217 says so for 125 and 126; 70 is the sysexits `EX_SOFTWARE`
 value and shares the same limit). svd must not run a service that uses those statuses on OpenBSD,
 and the plan validation cannot see them.
 
@@ -243,7 +246,7 @@ and the plan validation cannot see them.
 
 Revision 1 §1 and §3 claimed more than the decided path does. Corrected:
 
-- `--class` applies only the **login.conf resource limits**, lowering only (README.md:284-288). It
+- `--class` applies only the **login.conf resource limits**, lowering only (README.md:288-292). It
   does not apply priority, umask or path. svd's K3 limits reach the service only through the class;
   without `--class` the limits are those root had.
 - sdcreds has **no pledge and no unveil**. The `nnp`, landlock, seccomp and `execpromises` rows of
@@ -253,10 +256,10 @@ Revision 1 §1 and §3 claimed more than the decided path does. Corrected:
   (`cmd/sdcreds/run_openbsd.go:200`). A `stop.signal` outside that set is never delivered; the plan
   validation refuses it on OpenBSD.
 - No mount namespace: while the program runs, the credentials are visible to anything that can
-  reach the directory, and root can always read them (README.md:235-236). The path
+  reach the directory, and root can always read them (README.md:239-240). The path
   `/var/run/sdcreds/<service>` discloses service names to local users; the contents are 0400/0500
   owned by the service uid. Accepted residual.
-- Memory: `mlockall` is unusable from a Go process on OpenBSD (README.md:291-297); protection is
+- Memory: `mlockall` is unusable from a Go process on OpenBSD (README.md:295-301); protection is
   encrypted swap, `RLIMIT_CORE` 0 and `kern.nosuidcoredump`. A memory dump taken by an
   administrator can still contain the plaintext.
 - No cgroups, no freeze, no tree accounting. The uid kill is the tree kill for **a service run by
@@ -322,7 +325,7 @@ third-party image run as root is not acceptable for it.
 | F2 | env, fds, readiness stripped | **answered** for env and `--pass-fd` readiness; `NOTIFY_SOCKET`/`LISTEN_FDS` **open**; umask not passed | §2; `gate_unix.go:107-276`, `run.go:311-312` |
 | F3 | mode U, root and a dedicated uid | **answered** by requirement | §1.1-1.3, §2; `run.go:193`, `killuid_openbsd.go:25`, `mfs_openbsd.go:77-87` |
 | F4 | signalling rule vs root pid list | **answered**, residuals listed (killers of different users can kill each other; fail closed) | §3; `killuid_openbsd.go:36-84`, `uidkill.go:126-184` |
-| F5 | set-id survivor | scan **answered**; kill of a set-id survivor **open** | §4; `kinfo.go:77-109`, README.md:261-264 |
+| F5 | set-id survivor | scan **answered**; kill of a set-id survivor **open** | §4; `kinfo.go:77-109`, README.md:265-267 |
 | F6 | restart races the old helper | **answered** (47 s wait, derived from the constants) | §5; `lock_unix.go:42-50`, `uidkill.go:37-54`, `run_openbsd.go:40,132-135` |
 | F7 | ambiguous statuses | **answered**; a failed release is always 70; 125/126/70 ambiguity remains | §6; `run.go:44-52`, `releaseexit.go:15-24` |
 | F8 | draft claims | **answered** by correction; pledge/unveil **open** | §7 |
